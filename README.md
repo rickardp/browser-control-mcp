@@ -231,6 +231,131 @@ No existing extension provides the specific capability needed: auto-configuring 
 
 The agent never needs to call `coordinator_launch_browser` for the default case. The moment it calls `browser_navigate("http://localhost:3000")`, the browser appears.
 
+## Integrating with MCP Servers
+
+The coordinator eliminates the static configuration problem that browser automation MCP servers have. Without the coordinator, you must either:
+
+- Let the MCP server launch its own bundled Chromium (no control over browser, profile, or lifecycle)
+- Pass a static `--cdp-endpoint` flag and manually manage a browser process
+
+The coordinator handles both: it pre-allocates a port, passes it to the child MCP, and launches the real browser lazily on demand.
+
+### Playwright MCP (default)
+
+The coordinator uses [`@anthropic-ai/mcp-server-playwright`](https://github.com/anthropics/anthropic-ai-mcp-server-playwright) by default. No extra configuration needed — the coordinator spawns it as a subprocess and injects `--cdp-endpoint` automatically.
+
+**Claude Code** (`.mcp.json`):
+```json
+{
+  "mcpServers": {
+    "browser": {
+      "command": "npx",
+      "args": ["-y", "@anthropic-community/browser-coordinator-mcp"]
+    }
+  }
+}
+```
+
+**Claude Desktop** (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "browser": {
+      "command": "npx",
+      "args": ["-y", "@anthropic-community/browser-coordinator-mcp"]
+    }
+  }
+}
+```
+
+**Without the coordinator**, you'd have to configure Playwright MCP directly and either accept its bundled Chromium or manually start a browser and hardcode the port:
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@anthropic-ai/mcp-server-playwright"]
+    }
+  }
+}
+```
+
+This launches Playwright's own Chromium with no browser choice, no lifecycle control, and no way to restart or switch browsers mid-session.
+
+### Browserbase MCP
+
+[Browserbase](https://github.com/nichochar/mcp-server-browserbase) provides cloud-hosted browsers. You can use it as the child MCP instead of Playwright:
+
+```json
+{
+  "mcpServers": {
+    "browser": {
+      "command": "npx",
+      "args": [
+        "-y", "@anthropic-community/browser-coordinator-mcp",
+        "--mcp", "@nichochar/mcp-server-browserbase"
+      ],
+      "env": {
+        "BROWSERBASE_API_KEY": "your-api-key",
+        "BROWSERBASE_PROJECT_ID": "your-project-id"
+      }
+    }
+  }
+}
+```
+
+### Puppeteer MCP
+
+The [Puppeteer MCP server](https://github.com/anthropics/anthropic-quickstarts/tree/main/mcp-server-puppeteer) can also be used as a child MCP:
+
+```json
+{
+  "mcpServers": {
+    "browser": {
+      "command": "npx",
+      "args": [
+        "-y", "@anthropic-community/browser-coordinator-mcp",
+        "--mcp", "@anthropic-ai/mcp-server-puppeteer"
+      ]
+    }
+  }
+}
+```
+
+### Any CDP-Compatible MCP Server
+
+Any MCP server that accepts a `--cdp-endpoint` flag works as a child. The coordinator automatically appends `--cdp-endpoint=http://localhost:<port>` to the child's arguments:
+
+```json
+{
+  "mcpServers": {
+    "browser": {
+      "command": "npx",
+      "args": [
+        "-y", "@anthropic-community/browser-coordinator-mcp",
+        "--mcp", "your-custom-mcp-server"
+      ]
+    }
+  }
+}
+```
+
+Everything after `--mcp` is forwarded as the child MCP command. The coordinator adds `--cdp-endpoint` unless it's already present in the args.
+
+### What the Coordinator Adds
+
+Without the coordinator, each of these MCP servers requires you to either accept their defaults or manually manage browser processes. With the coordinator:
+
+| Problem | Without Coordinator | With Coordinator |
+|---------|-------------------|-----------------|
+| **Browser choice** | Uses bundled Chromium (or none) | Auto-detects Chrome, Edge, Chromium, Brave |
+| **Lifecycle** | Browser starts at MCP init (or never) | Lazy launch on first tool call |
+| **Restart** | Kill and restart the entire MCP server | `coordinator_restart_browser` keeps the session |
+| **Switch browser** | Change config and restart | `coordinator_launch_browser` with `browserType` |
+| **Port management** | Hardcode a port or let MCP pick | Dynamic port pre-allocation |
+| **VS Code** | No special support | Auto-detects environment, enables preview |
+
 ## Tools
 
 ### Coordinator Tools
@@ -368,8 +493,8 @@ The first available browser is used by default. Override with `--browser <type>`
 ```bash
 git clone <repo-url>
 cd browser-coordinator-mcp
-npm install
-npm run build
+bun install
+bun run build
 ```
 
 ### Testing locally
@@ -386,8 +511,8 @@ npx . --browser chrome --no-headless
 
 ```bash
 cd vscode-extension
-npm install
-npm run build
+bun install
+bun run build
 ```
 
 Load the extension in VS Code via "Developer: Install Extension from Location..." pointing to the `vscode-extension/` directory.

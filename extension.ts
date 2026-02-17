@@ -256,7 +256,7 @@ function findListeningPort(): number | null {
   try {
     if (fs.existsSync(PORT_FILE)) {
       const saved = parseInt(fs.readFileSync(PORT_FILE, "utf8").trim(), 10);
-      if (!isNaN(saved) && saved > 0) {
+      if (!Number.isNaN(saved) && saved > 0) {
         // TODO: verify it's actually responding with CDP /json
         return saved;
       }
