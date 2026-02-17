@@ -4,7 +4,7 @@ import { platform } from "node:os";
 
 export interface BrowserInfo {
   name: string;
-  type: "chrome" | "edge" | "chromium" | "brave" | "firefox";
+  type: "chrome" | "edge" | "chromium" | "brave" | "safari" | "firefox";
   path: string;
   supportsCDP: boolean;
 }
@@ -23,6 +23,9 @@ const BROWSER_PATHS: Record<string, Record<string, string[]>> = {
     ],
     brave: [
       "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    ],
+    safari: [
+      "/Applications/Safari.app/Contents/MacOS/Safari",
     ],
   },
   linux: {
@@ -79,7 +82,7 @@ export function detectBrowsers(): BrowserInfo[] {
           name: formatName(type, browserPath),
           type: type as BrowserInfo["type"],
           path: browserPath,
-          supportsCDP: type !== "firefox",
+          supportsCDP: type !== "firefox" && type !== "safari",
         });
         break; // Take first match per type
       }

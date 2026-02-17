@@ -54,6 +54,19 @@ if (platform() === "linux") {
   });
 }
 
+if (platform() === "darwin") {
+  await test("Safari is detected on macOS", () => {
+    const safari = browsers.find((b) => b.type === "safari");
+    assert.ok(safari, "Safari not found on macOS");
+  });
+
+  await test("Safari does not support CDP", () => {
+    const safari = browsers.find((b) => b.type === "safari");
+    assert.ok(safari, "Safari not found on macOS");
+    assert.strictEqual(safari.supportsCDP, false, "Safari should not support CDP");
+  });
+}
+
 await test("findBrowser() returns Chrome as top priority", () => {
   const top = findBrowser();
   assert.ok(top, "findBrowser() returned null");

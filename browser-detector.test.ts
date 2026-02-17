@@ -91,6 +91,18 @@ describe("browser-detector", () => {
       expect(browsers[0].type).toBe("brave");
       expect(browsers[0].supportsCDP).toBe(true);
     });
+
+    test("detects Safari on macOS with supportsCDP false", () => {
+      fsMock.existsSync.mockImplementation((p: string) =>
+        p === "/Applications/Safari.app/Contents/MacOS/Safari"
+      );
+
+      const browsers = detectBrowsers();
+      expect(browsers.length).toBe(1);
+      expect(browsers[0].type).toBe("safari");
+      expect(browsers[0].supportsCDP).toBe(false);
+      expect(browsers[0].path).toBe("/Applications/Safari.app/Contents/MacOS/Safari");
+    });
   });
 
   describe("findBrowser()", () => {
@@ -127,6 +139,14 @@ describe("browser-detector", () => {
       );
 
       expect(findBrowser()!.type).toBe("chrome");
+    });
+
+    test("skips Safari since it does not support CDP", () => {
+      fsMock.existsSync.mockImplementation((p: string) =>
+        p === "/Applications/Safari.app/Contents/MacOS/Safari"
+      );
+
+      expect(findBrowser()).toBeNull();
     });
   });
 });
