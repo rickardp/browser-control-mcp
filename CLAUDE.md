@@ -41,9 +41,9 @@ Files are flat in the project root — no `src/` directory. Output compiles to `
 ## Commands
 
 ```bash
-npm run build    # Compile TypeScript
-npm run dev      # Watch mode
-npm start        # Run compiled server
+bun run build    # Compile TypeScript (MCP + extension)
+bun run dev      # Watch mode (MCP only)
+bun start        # Run compiled server
 ```
 
 ## Blueprint Documentation
@@ -57,6 +57,7 @@ Architecture decisions and specifications are in `docs/`:
   - [004-proxy-architecture](docs/adrs/004-proxy-architecture.md) — Proxy architecture for tool merging
   - [005-lazy-browser-launch](docs/adrs/005-lazy-browser-launch.md) — Lazy browser launch strategy
   - [006-two-tier-vscode-integration](docs/adrs/006-two-tier-vscode-integration.md) — Two-tier VS Code integration
+  - [007-bun-package-manager](docs/adrs/007-bun-package-manager.md) — Bun as package manager
 - `docs/specs/` — Specifications
   - [product](docs/specs/product.md) — Vision, users, success metrics
   - [tech-stack](docs/specs/tech-stack.md) — Runtime, dependencies, commands

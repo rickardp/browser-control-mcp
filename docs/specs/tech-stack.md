@@ -44,10 +44,10 @@ browser-control-mcp/
 
 | Command | Description |
 |---------|-------------|
-| `npm run build` | Compile TypeScript (`tsc`) |
-| `npm run dev` | Watch mode (`tsc --watch`) |
-| `npm start` | Run compiled server (`node dist/cli.js`) |
-| `npm run prepare` | Pre-install build hook (`tsc`) |
+| `bun run build` | Compile TypeScript (`tsc`) |
+| `bun run dev` | Watch mode (`tsc --watch`) |
+| `bun start` | Run compiled server (`node dist/cli.js`) |
+| `bun run prepare` | Pre-install build hook (`tsc`) |
 
 ## CLI
 
