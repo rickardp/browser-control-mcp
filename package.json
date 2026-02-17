@@ -13,6 +13,8 @@
     "build:extension": "tsc -p tsconfig.extension.json",
     "dev": "tsc --watch",
     "start": "node dist/cli.js",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
     "prepare": "tsc && tsc -p tsconfig.extension.json"
   },
   "keywords": [

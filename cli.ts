@@ -4,7 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CoordinatorServer, type CoordinatorOptions } from "./coordinator-server.js";
 import { logError } from "./log.js";
 
-function parseArgs(): CoordinatorOptions {
+export function parseArgs(): CoordinatorOptions {
   const args = process.argv.slice(2);
   const opts: CoordinatorOptions = {};
 
