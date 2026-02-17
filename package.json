@@ -1,12 +1,25 @@
 {
-  "name": "@anthropic-community/browser-coordinator-mcp",
+  "name": "@rickardp/browser-coordinator-mcp",
   "version": "0.1.0",
   "description": "MCP server that coordinates browser lifecycle and proxies browser automation tools",
   "type": "module",
   "main": "dist/cli.js",
   "bin": {
-    "browser-coordinator-mcp": "dist/cli.js"
+    "@rickardp/browser-coordinator-mcp": "dist/cli.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rickardp/browser-control-mcp.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "dist/**/*.js.map",
+    "dist/**/*.d.ts.map"
+  ],
   "scripts": {
     "build": "tsc && tsc -p tsconfig.extension.json",
     "build:mcp": "tsc",
