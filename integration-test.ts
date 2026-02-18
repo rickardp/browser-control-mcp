@@ -129,11 +129,14 @@ console.log(
   `\nCDP-capable browsers for launch tests: ${cdpBrowsers.map((b) => b.name).join(", ") || "none"}\n`
 );
 
+let browsersLaunched = 0;
+
 for (const browserInfo of cdpBrowsers) {
   let instance: BrowserInstance | undefined;
 
   try {
     // Test 1: Browser launches headlessly
+    let launchFailed = false;
     await test(`${browserInfo.name} launches headlessly`, async () => {
       const port = await getFreePort();
       instance = await launchBrowser(port, { browserType: browserInfo.type });
@@ -145,80 +148,90 @@ for (const browserInfo of cdpBrowsers) {
       );
     });
 
-    // Test 2: CDP endpoint responds
-    await test(`${browserInfo.name} CDP endpoint responds`, async () => {
-      assert.ok(instance, "No browser instance (launch failed)");
-      const res = await fetch(`http://127.0.0.1:${instance.cdpPort}/json/version`);
-      assert.strictEqual(res.status, 200, `Expected 200, got ${res.status}`);
-      const json = (await res.json()) as Record<string, unknown>;
-      assert.ok(json.Browser, `Missing "Browser" field in /json/version response`);
-    });
+    // If launch failed, skip remaining tests for this browser
+    if (!instance) {
+      launchFailed = true;
+      console.log(`  SKIP  ${browserInfo.name} — launch failed, skipping remaining tests`);
+    }
 
-    // Test 3: Navigate to a page via CDP
-    await test(`${browserInfo.name} navigates to a page`, async () => {
-      assert.ok(instance, "No browser instance (launch failed)");
+    if (!launchFailed) {
+      browsersLaunched++;
 
-      // Get the page target
-      const targets = (await (
-        await fetch(`http://127.0.0.1:${instance.cdpPort}/json`)
-      ).json()) as Array<Record<string, string>>;
-      const pageTarget = targets.find((t) => t.type === "page");
-      assert.ok(pageTarget, "No page target found in /json");
-      assert.ok(pageTarget.webSocketDebuggerUrl, "No webSocketDebuggerUrl on page target");
-
-      // Connect via WebSocket and navigate
-      const ws = new WebSocket(pageTarget.webSocketDebuggerUrl);
-      await new Promise<void>((resolve, reject) => {
-        ws.addEventListener("open", () => resolve());
-        ws.addEventListener("error", (e) => reject(new Error(`WS connect failed: ${e}`)));
-        setTimeout(() => reject(new Error("WS connect timed out")), 5000);
+      // Test 2: CDP endpoint responds
+      await test(`${browserInfo.name} CDP endpoint responds`, async () => {
+        assert.ok(instance, "No browser instance (launch failed)");
+        const res = await fetch(`http://127.0.0.1:${instance.cdpPort}/json/version`);
+        assert.strictEqual(res.status, 200, `Expected 200, got ${res.status}`);
+        const json = (await res.json()) as Record<string, unknown>;
+        assert.ok(json.Browser, `Missing "Browser" field in /json/version response`);
       });
 
-      try {
-        await cdpSend(ws, "Page.enable");
-        await cdpSend(ws, "Page.navigate", {
-          url: "data:text/html,<title>Hello</title>",
-        });
+      // Test 3: Navigate to a page via CDP
+      await test(`${browserInfo.name} navigates to a page`, async () => {
+        assert.ok(instance, "No browser instance (launch failed)");
 
-        // Give the browser a moment to update the target info
-        await new Promise((r) => setTimeout(r, 500));
-
-        // Verify navigation via /json
-        const updatedTargets = (await (
+        // Get the page target
+        const targets = (await (
           await fetch(`http://127.0.0.1:${instance.cdpPort}/json`)
         ).json()) as Array<Record<string, string>>;
-        const updatedPage = updatedTargets.find((t) => t.type === "page");
-        assert.ok(updatedPage, "No page target found after navigation");
-        assert.ok(
-          updatedPage.url.includes("data:text/html"),
-          `Expected data: URL, got: ${updatedPage.url}`
-        );
-      } finally {
-        ws.close();
-      }
-    });
+        const pageTarget = targets.find((t) => t.type === "page");
+        assert.ok(pageTarget, "No page target found in /json");
+        assert.ok(pageTarget.webSocketDebuggerUrl, "No webSocketDebuggerUrl on page target");
 
-    // Test 4: Browser stops cleanly
-    await test(`${browserInfo.name} stops cleanly`, async () => {
-      assert.ok(instance, "No browser instance (launch failed)");
-      stopBrowser(instance);
+        // Connect via WebSocket and navigate
+        const ws = new WebSocket(pageTarget.webSocketDebuggerUrl);
+        await new Promise<void>((resolve, reject) => {
+          ws.addEventListener("open", () => resolve());
+          ws.addEventListener("error", (e) => reject(new Error(`WS connect failed: ${e}`)));
+          setTimeout(() => reject(new Error("WS connect timed out")), 5000);
+        });
 
-      // Wait for process to exit (up to 5s)
-      await new Promise<void>((resolve) => {
-        if (instance!.process.exitCode !== null) {
-          resolve();
-          return;
+        try {
+          await cdpSend(ws, "Page.enable");
+          await cdpSend(ws, "Page.navigate", {
+            url: "data:text/html,<title>Hello</title>",
+          });
+
+          // Give the browser a moment to update the target info
+          await new Promise((r) => setTimeout(r, 500));
+
+          // Verify navigation via /json
+          const updatedTargets = (await (
+            await fetch(`http://127.0.0.1:${instance.cdpPort}/json`)
+          ).json()) as Array<Record<string, string>>;
+          const updatedPage = updatedTargets.find((t) => t.type === "page");
+          assert.ok(updatedPage, "No page target found after navigation");
+          assert.ok(
+            updatedPage.url.includes("data:text/html"),
+            `Expected data: URL, got: ${updatedPage.url}`
+          );
+        } finally {
+          ws.close();
         }
-        instance!.process.on("exit", () => resolve());
-        setTimeout(() => resolve(), 5000);
       });
 
-      assert.ok(
-        instance.process.killed || instance.process.exitCode !== null,
-        "Browser process still running after stopBrowser()"
-      );
-      instance = undefined;
-    });
+      // Test 4: Browser stops cleanly
+      await test(`${browserInfo.name} stops cleanly`, async () => {
+        assert.ok(instance, "No browser instance (launch failed)");
+        stopBrowser(instance);
+
+        // Wait for process to exit (up to 5s)
+        await new Promise<void>((resolve) => {
+          if (instance!.process.exitCode !== null) {
+            resolve();
+            return;
+          }
+          instance!.process.on("exit", () => resolve());
+          setTimeout(() => resolve(), 5000);
+        });
+
+        assert.ok(
+          instance.process.killed || instance.process.exitCode !== null,
+          "Browser process still running after stopBrowser()"
+        );
+        instance = undefined;
+      });
+    }
   } finally {
     // Guarantee cleanup even if tests throw
     if (instance) {
@@ -230,6 +243,14 @@ for (const browserInfo of cdpBrowsers) {
     }
   }
 }
+
+// Require at least one browser to successfully launch
+await test("At least one browser launched successfully", () => {
+  assert.ok(
+    browsersLaunched >= 1,
+    `No browsers launched successfully out of ${cdpBrowsers.length} detected`
+  );
+});
 
 console.log(`\nResults: ${passed} passed, ${failed} failed`);
 
