@@ -110,6 +110,12 @@ export async function launchBrowser(
     "--mute-audio",
   ];
 
+  // CI environments (GitHub Actions, etc.) typically run as root,
+  // which requires --no-sandbox for Chromium-based browsers.
+  if (process.env.CI || process.getuid?.() === 0) {
+    args.push("--no-sandbox");
+  }
+
   if (opts.headless !== false) {
     args.push("--headless=new");
   }
@@ -130,6 +136,8 @@ export async function launchBrowser(
   const cdpWsUrl = await new Promise<string>((resolve, reject) => {
     let stderr = "";
     const timeout = setTimeout(() => {
+      // Kill the hung process so it doesn't keep the event loop alive
+      try { proc.kill("SIGKILL"); } catch { /* already dead */ }
       reject(new Error(`Browser did not produce CDP URL within 15s. stderr: ${stderr}`));
     }, 15000);
 
@@ -182,8 +190,8 @@ export function stopBrowser(instance: BrowserInstance): void {
   try {
     if (!instance.process.killed) {
       instance.process.kill("SIGTERM");
-      // Force kill after 5s
-      setTimeout(() => {
+      // Force kill after 5s (unref so it doesn't keep the event loop alive)
+      const killTimer = setTimeout(() => {
         try {
           if (!instance.process.killed) {
             instance.process.kill("SIGKILL");
@@ -192,6 +200,7 @@ export function stopBrowser(instance: BrowserInstance): void {
           // already dead
         }
       }, 5000);
+      killTimer.unref();
     }
   } catch {
     // already dead
