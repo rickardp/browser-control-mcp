@@ -66,6 +66,7 @@ Architecture decisions and specifications are in `docs/`:
   - [006-two-tier-vscode-integration](docs/adrs/006-two-tier-vscode-integration.md) — Two-tier VS Code integration
   - [007-bun-package-manager](docs/adrs/007-bun-package-manager.md) — Bun as package manager
   - [008-cdp-reverse-proxy](docs/adrs/008-cdp-reverse-proxy.md) — CDP reverse proxy with two independent MCP entries
+  - [009-unix-domain-socket-ipc](docs/adrs/009-unix-domain-socket-ipc.md) — Unix domain sockets for extension IPC
 - `docs/specs/` — Specifications
   - [product](docs/specs/product.md) — Vision, users, success metrics
   - [tech-stack](docs/specs/tech-stack.md) — Runtime, dependencies, commands
