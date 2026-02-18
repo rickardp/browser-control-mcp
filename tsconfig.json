@@ -21,6 +21,9 @@
     "browser-launcher.ts",
     "browser-detector.ts",
     "vscode-integration.ts",
+    "ipc-types.ts",
+    "ipc-socket.ts",
+    "cdp-client.ts",
     "log.ts"
   ],
   "exclude": ["node_modules", "dist", "extension.ts"]

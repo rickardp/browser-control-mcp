@@ -86,6 +86,13 @@ export class CdpProxy {
   }
 
   /**
+   * Get the backend CDP port (or null if not set).
+   */
+  getBackendPort(): number | null {
+    return this.backendPort;
+  }
+
+  /**
    * Stop the proxy server and close all connections.
    */
   async close(): Promise<void> {

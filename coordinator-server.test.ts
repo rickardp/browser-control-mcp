@@ -186,7 +186,11 @@ describe("CoordinatorServer", () => {
       expect(toolNames).toContain("coordinator_launch_browser");
       expect(toolNames).toContain("coordinator_stop_browser");
       expect(toolNames).toContain("coordinator_restart_browser");
-      expect(toolNames).toHaveLength(5);
+      expect(toolNames).toContain("coordinator_navigate");
+      expect(toolNames).toContain("coordinator_select_element");
+      expect(toolNames).toContain("coordinator_get_dom");
+      expect(toolNames).toContain("coordinator_screenshot");
+      expect(toolNames).toHaveLength(9);
 
       // Should NOT contain child MCP tools
       expect(toolNames).not.toContain("browser_navigate");

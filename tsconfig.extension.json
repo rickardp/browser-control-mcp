@@ -12,6 +12,6 @@
     "declaration": true,
     "sourceMap": true
   },
-  "include": ["extension.ts"],
+  "include": ["extension.ts", "ipc-types.ts"],
   "exclude": ["node_modules", "dist"]
 }

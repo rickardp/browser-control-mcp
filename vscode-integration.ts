@@ -3,6 +3,8 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { execSync } from "node:child_process";
 import { log, logError } from "./log.js";
+import { discoverExtensionSocket, sendIpcRequest } from "./ipc-socket.js";
+import type { ExtensionState } from "./ipc-types.js";
 
 const PORT_FILE = path.join(os.tmpdir(), "vscode-cdp-port");
 
@@ -10,6 +12,9 @@ export interface VSCodeEnvironment {
   detected: boolean;
   cdpPort: number | null;
   terminalIntegration: boolean;
+  ipcSocketPath: string | null;
+  extensionVersion: string | null;
+  activeBrowserUrl: string | null;
 }
 
 /**
@@ -25,34 +30,104 @@ export function isInVSCode(): boolean {
 }
 
 /**
- * Detect VS Code environment and any available CDP port.
+ * Detect VS Code environment with IPC-first discovery (async).
+ *
+ * Priority:
+ * 1. IPC socket probe (direct communication with extension)
+ * 2. Environment variable set by companion extension
+ * 3. Port file written by companion extension
+ * 4. Scan VS Code process args
  */
-export function detectVSCode(): VSCodeEnvironment {
+export async function detectVSCodeAsync(): Promise<VSCodeEnvironment> {
   const detected = isInVSCode();
 
   if (!detected) {
-    return { detected: false, cdpPort: null, terminalIntegration: false };
+    return {
+      detected: false,
+      cdpPort: null,
+      terminalIntegration: false,
+      ipcSocketPath: null,
+      extensionVersion: null,
+      activeBrowserUrl: null,
+    };
   }
 
   log("VS Code environment detected");
 
-  // Try to find CDP port from companion extension
+  // 1. Try IPC socket first
+  const cwd = process.cwd();
+  const ipcSocketPath = await discoverExtensionSocket(cwd);
+
+  if (ipcSocketPath) {
+    log(`IPC socket found: ${ipcSocketPath}`);
+    try {
+      const resp = await sendIpcRequest(ipcSocketPath, {
+        id: "init",
+        type: "get_state",
+      });
+
+      if (resp.type === "state" && resp.payload) {
+        const state = resp.payload as unknown as ExtensionState;
+        log(`Extension state: version=${state.extensionVersion}, cdpPort=${state.cdpPort}, url=${state.activeBrowserUrl}`);
+        return {
+          detected: true,
+          cdpPort: state.cdpPort,
+          terminalIntegration: true,
+          ipcSocketPath,
+          extensionVersion: state.extensionVersion,
+          activeBrowserUrl: state.activeBrowserUrl,
+        };
+      }
+    } catch (err) {
+      logError("Failed to get extension state via IPC", err);
+    }
+  }
+
+  // 2-4. Fall back to legacy discovery
   const cdpPort = discoverCDPPort();
 
   return {
     detected: true,
     cdpPort,
     terminalIntegration: true,
+    ipcSocketPath: null,
+    extensionVersion: null,
+    activeBrowserUrl: null,
   };
 }
 
 /**
- * Discover VS Code's CDP port from various sources.
- *
- * Priority:
- * 1. Environment variable set by companion extension
- * 2. Port file written by companion extension
- * 3. Scan VS Code process args (requires /proc or ps)
+ * Synchronous VS Code detection (legacy, still used as fallback).
+ */
+export function detectVSCode(): VSCodeEnvironment {
+  const detected = isInVSCode();
+
+  if (!detected) {
+    return {
+      detected: false,
+      cdpPort: null,
+      terminalIntegration: false,
+      ipcSocketPath: null,
+      extensionVersion: null,
+      activeBrowserUrl: null,
+    };
+  }
+
+  log("VS Code environment detected");
+  const cdpPort = discoverCDPPort();
+
+  return {
+    detected: true,
+    cdpPort,
+    terminalIntegration: true,
+    ipcSocketPath: null,
+    extensionVersion: null,
+    activeBrowserUrl: null,
+  };
+}
+
+/**
+ * Discover VS Code's CDP port from various sources (legacy).
  */
 function discoverCDPPort(): number | null {
   // 1. Env var from companion extension
@@ -97,7 +172,6 @@ function scanProcessArgs(): number | null {
 
   try {
     if (osType === "linux") {
-      // Walk up the process tree looking for the VS Code process
       const vscodePid = process.env.VSCODE_PID;
       if (vscodePid) {
         const cmdline = fs.readFileSync(`/proc/${vscodePid}/cmdline`, "utf8");
@@ -105,7 +179,6 @@ function scanProcessArgs(): number | null {
         if (match) return parseInt(match[1], 10);
       }
     } else if (osType === "darwin") {
-      // Use ps to find VS Code's args
       const output = execSync(
         "ps aux | grep -E '(code|Code|electron)' | grep remote-debugging-port",
         { encoding: "utf8", timeout: 3000 }
@@ -113,7 +186,6 @@ function scanProcessArgs(): number | null {
       const match = output.match(/--remote-debugging-port=(\d+)/);
       if (match) return parseInt(match[1], 10);
     }
-    // Windows: could use wmic, but complex and unreliable
   } catch {
     // ignore failures
   }
@@ -128,7 +200,6 @@ export function isArgvConfigured(): boolean {
   try {
     const argvPath = path.join(os.homedir(), ".vscode", "argv.json");
     if (fs.existsSync(argvPath)) {
-      // argv.json may have comments (JSONC), strip them
       const content = fs.readFileSync(argvPath, "utf8");
       const stripped = content.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
       const argv = JSON.parse(stripped);
@@ -142,7 +213,6 @@ export function isArgvConfigured(): boolean {
 
 /**
  * Discover webview targets from VS Code's CDP endpoint.
- * Used in Tier 2 to find Simple Browser's webview for automation.
  */
 export async function findWebviewTarget(
   cdpPort: number,
@@ -159,16 +229,12 @@ export async function findWebviewTarget(
 
     log(`Found ${targets.length} CDP targets on port ${cdpPort}`);
 
-    // Look for webview targets matching the URL
     for (const target of targets) {
       if (urlFilter && target.url.includes(urlFilter)) {
         return target;
       }
-      // Simple Browser webviews have vscode-webview:// scheme initially
-      // but when navigated they'll show the actual URL
     }
 
-    // If no URL filter, return any page-type target
     if (!urlFilter) {
       return targets.find((t) => t.type === "page") ?? null;
     }
