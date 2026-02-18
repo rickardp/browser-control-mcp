@@ -1,9 +1,12 @@
 ---
-status: accepted
+status: superseded
 date: 2025-01-15
+superseded-by: ADR-008
 ---
 
 # ADR-004: Proxy Architecture for MCP Tool Merging
+
+> **Superseded by [ADR-008: CDP Reverse Proxy](008-cdp-reverse-proxy.md).** The MCP proxy architecture has been replaced with a CDP reverse proxy and two independent MCP entries.
 
 ## Context
 

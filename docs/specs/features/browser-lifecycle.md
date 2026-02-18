@@ -85,23 +85,36 @@ These tools are exposed to the AI host for direct browser management:
 | Tool | Description | Requires Browser |
 |------|-------------|-----------------|
 | `coordinator_list_browsers` | List installed CDP-capable browsers | No |
-| `coordinator_status` | Show current state (browser, port, tier, child) | No |
+| `coordinator_status` | Show current state (browser, proxy port, VS Code tier) | No |
 | `coordinator_launch_browser` | Explicitly launch or relaunch with options | Creates one |
 | `coordinator_stop_browser` | Stop running browser | Yes |
-| `coordinator_restart_browser` | Kill and relaunch on same port | Yes |
+| `coordinator_restart_browser` | Kill and relaunch. Proxy port stays the same. | Yes |
 
 ## Lazy Launch Flow
 
+The browser can be launched two ways:
+
+### Trigger 1: CDP connection (lazy)
 ```
 Startup:
-  1. getFreePort() → e.g., 41837
-  2. Spawn child MCP with --cdp-endpoint=http://localhost:41837
-  3. Child registers all tools (no browser needed yet)
+  1. Start CDP proxy on port 0 (OS-assigned) → e.g., 41837
+  2. Write state file: { port: 41837, pid: <pid> }
+  3. No browser running — zero memory, zero CPU
 
-First child tool call (e.g., browser_navigate):
-  4. ensureBrowserRunning() triggers
-  5. launchBrowser(41837, opts) spawns Chrome
-  6. waitForPort(41837) confirms CDP ready
-  7. Forward tool call to child MCP
-  8. Child connects to CDP lazily and executes
+First CDP connection (child MCP calls a tool):
+  4. Child MCP connects to proxy port 41837
+  5. Proxy sees no backend → triggers lazy launch callback
+  6. getFreePort() → e.g., 52100 (internal port)
+  7. launchBrowser(52100, opts) spawns Chrome
+  8. Proxy sets backend to 52100, pipes connection through
+  9. Child MCP's CDP session works transparently
+```
+
+### Trigger 2: Explicit launch (coordinator tool)
+```
+Agent calls coordinator_launch_browser:
+  1. getFreePort() → internal port
+  2. launchBrowser(port, opts) spawns browser
+  3. Proxy backend updated to new internal port
+  4. Existing proxy connections closed (child MCPs reconnect)
 ```

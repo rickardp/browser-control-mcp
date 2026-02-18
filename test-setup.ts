@@ -13,6 +13,8 @@ import { mock } from "bun:test";
 export const fsMock = {
   existsSync: mock((_path: string): boolean => false),
   readFileSync: mock((_path: string, _enc?: string): string => ""),
+  writeFileSync: mock((_path: string, _data: string) => {}),
+  unlinkSync: mock((_path: string) => {}),
   mkdirSync: mock((_path: string, _opts?: any) => {}),
   rmSync: mock((_path: string, _opts?: any) => {}),
 };
@@ -36,25 +38,6 @@ export const netMock = {
   createConnection: mock((_opts: any, _cb?: () => void): any => null),
 };
 
-// ─── @modelcontextprotocol/sdk/client ───────────────────────────────────────
-export const sdkClientMock = {
-  connect: mock(async () => {}),
-  close: mock(async () => {}),
-  listTools: mock(async () => ({
-    tools: [
-      { name: "browser_navigate", description: "Navigate", inputSchema: { type: "object" } },
-      { name: "browser_click", description: "Click", inputSchema: { type: "object" } },
-    ],
-  })),
-  callTool: mock(async () => ({
-    content: [{ type: "text", text: "result" }],
-  })),
-};
-
-export const sdkTransportMock = {
-  close: mock(async () => {}),
-};
-
 // ─── @modelcontextprotocol/sdk/server ───────────────────────────────────────
 export const registeredHandlers = new Map<string, Function>();
 
@@ -67,21 +50,6 @@ mock.module("node:fs", () => fsMock);
 mock.module("node:os", () => osMock);
 mock.module("node:child_process", () => cpMock);
 mock.module("node:net", () => netMock);
-
-mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
-  Client: class MockClient {
-    connect = sdkClientMock.connect;
-    close = sdkClientMock.close;
-    listTools = sdkClientMock.listTools;
-    callTool = sdkClientMock.callTool;
-  },
-}));
-
-mock.module("@modelcontextprotocol/sdk/client/stdio.js", () => ({
-  StdioClientTransport: class MockTransport {
-    close = sdkTransportMock.close;
-  },
-}));
 
 mock.module("@modelcontextprotocol/sdk/server/index.js", () => ({
   Server: class MockServer {

@@ -8,7 +8,8 @@ import type {
   CallToolResult,
   TextContent,
 } from "@modelcontextprotocol/sdk/types.js";
-import { McpProxy, type ChildMcpConfig } from "./mcp-proxy.js";
+import { CdpProxy } from "./cdp-proxy.js";
+import { writeState, clearState } from "./state.js";
 import {
   getFreePort,
   launchBrowser,
@@ -21,40 +22,10 @@ import { detectVSCode, type VSCodeEnvironment } from "./vscode-integration.js";
 import { log, logError } from "./log.js";
 
 export interface CoordinatorOptions {
-  /** Child MCP server config (e.g. @playwright/mcp) */
-  childMcp?: ChildMcpConfig;
   /** Browser launch options */
   browser?: LauncherOptions;
   /** Skip VS Code detection */
   noVscode?: boolean;
-}
-
-/**
- * Builds the child MCP config from CLI args or defaults.
- * Default: npx @playwright/mcp@latest --cdp-endpoint=http://localhost:<port>
- */
-function buildChildMcpConfig(port: number, opts?: ChildMcpConfig): ChildMcpConfig {
-  if (opts) {
-    // Inject the CDP endpoint into the args
-    const hasEndpoint = opts.args.some((a) => a.includes("--cdp-endpoint"));
-    return {
-      ...opts,
-      args: hasEndpoint
-        ? opts.args
-        : [...opts.args, `--cdp-endpoint=http://localhost:${port}`],
-    };
-  }
-
-  // Default: Playwright MCP
-  return {
-    command: "npx",
-    args: [
-      "-y",
-      "@anthropic-ai/mcp-server-playwright@latest",
-      "--cdp-endpoint",
-      `http://localhost:${port}`,
-    ],
-  };
 }
 
 // ─── Coordinator tool definitions ───────────────────────────────────────────
@@ -69,13 +40,13 @@ const COORDINATOR_TOOLS: Tool[] = [
   {
     name: "coordinator_status",
     description:
-      "Get the current status of the browser coordinator: whether a browser is running, the CDP endpoint, VS Code integration tier, and child MCP status.",
+      "Get the current status of the browser coordinator: whether a browser is running, the CDP proxy port, and VS Code integration tier.",
     inputSchema: { type: "object", properties: {}, required: [] },
   },
   {
     name: "coordinator_launch_browser",
     description:
-      "Explicitly launch or relaunch the browser. Normally the browser launches automatically on first browser tool call. Use this to switch browser type, toggle headless mode, or force a restart.",
+      "Explicitly launch or relaunch the browser. Normally the browser launches automatically when a CDP connection arrives at the proxy. Use this to switch browser type, toggle headless mode, or force a restart.",
     inputSchema: {
       type: "object",
       properties: {
@@ -100,7 +71,7 @@ const COORDINATOR_TOOLS: Tool[] = [
   {
     name: "coordinator_restart_browser",
     description:
-      "Restart the browser. Kills the current instance and launches a new one on the same port.",
+      "Restart the browser. Kills the current instance and launches a new one. The CDP proxy port stays the same — child MCPs reconnect automatically.",
     inputSchema: { type: "object", properties: {}, required: [] },
   },
 ];
@@ -115,10 +86,8 @@ function textResult(text: string): CallToolResult {
 
 export class CoordinatorServer {
   private server: Server;
-  private proxy: McpProxy | null = null;
+  private cdpProxy: CdpProxy;
   private browserInstance: BrowserInstance | null = null;
-  private preAllocatedPort: number = 0;
-  private browserLaunching = false;
   private vsCodeEnv: VSCodeEnvironment = { detected: false, cdpPort: null, terminalIntegration: false };
   private opts: CoordinatorOptions;
 
@@ -137,12 +106,13 @@ export class CoordinatorServer {
       }
     );
 
+    this.cdpProxy = new CdpProxy();
     this.setupHandlers();
   }
 
   /**
-   * Initialize: pre-allocate port, detect VS Code, spawn child MCP.
-   * No browser is launched — that's deferred to first tool call.
+   * Initialize: start CDP proxy, detect VS Code, write state file.
+   * No browser is launched — that's deferred to first CDP connection or explicit tool call.
    */
   async initialize(): Promise<void> {
     // Detect VS Code environment
@@ -150,51 +120,42 @@ export class CoordinatorServer {
       this.vsCodeEnv = detectVSCode();
     }
 
-    // Pre-allocate the CDP port
+    // Start CDP proxy on a free port
+    const proxyPort = await this.cdpProxy.listen(0);
+
+    // Set up lazy launch callback — triggered when a CDP connection arrives
+    // and no browser is running
+    this.cdpProxy.onLazyLaunch(async () => {
+      return this.launchBrowserInternal();
+    });
+
+    // If VS Code Tier 2, use its CDP port as the backend directly
     if (this.vsCodeEnv.cdpPort) {
-      // Tier 2: Use VS Code's existing CDP port
-      this.preAllocatedPort = this.vsCodeEnv.cdpPort;
-      log(`Using VS Code CDP port: ${this.preAllocatedPort}`);
-    } else {
-      // Tier 1: Allocate our own port for external browser
-      this.preAllocatedPort = await getFreePort();
-      log(`Pre-allocated CDP port: ${this.preAllocatedPort}`);
+      this.cdpProxy.setBackend(this.vsCodeEnv.cdpPort);
+      log(`Using VS Code CDP port: ${this.vsCodeEnv.cdpPort}`);
     }
 
-    // Build child MCP config with the port
-    const childConfig = buildChildMcpConfig(this.preAllocatedPort, this.opts.childMcp);
+    // Write state file so `wrap` subcommand can find the port
+    writeState({ port: proxyPort, pid: process.pid });
 
-    // Spawn child MCP — tools become available immediately
-    // (Playwright MCP connects lazily, so no browser needed yet)
-    this.proxy = new McpProxy(childConfig);
-    await this.proxy.connect();
-
-    log("Coordinator initialized. Browser will launch on first tool call.");
+    log(`Coordinator initialized. CDP proxy on port ${proxyPort}. Browser will launch on first connection.`);
   }
 
   private setupHandlers(): void {
-    // tools/list — merge coordinator tools + child MCP tools
+    // tools/list — only coordinator tools (no child MCP merging)
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-      const childTools = this.proxy?.getTools() ?? [];
       return {
-        tools: [...COORDINATOR_TOOLS, ...childTools],
+        tools: [...COORDINATOR_TOOLS],
       };
     });
 
-    // tools/call — route to coordinator or child
+    // tools/call — coordinator tools only
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
       const toolArgs = (args ?? {}) as Record<string, unknown>;
 
-      // Coordinator tools
       if (name.startsWith("coordinator_")) {
         return this.handleCoordinatorTool(name, toolArgs);
-      }
-
-      // Child MCP tools — ensure browser is running first
-      if (this.proxy?.hasTool(name)) {
-        await this.ensureBrowserRunning();
-        return this.proxy.callTool(name, toolArgs);
       }
 
       return textResult(`Unknown tool: ${name}`);
@@ -202,41 +163,18 @@ export class CoordinatorServer {
   }
 
   /**
-   * Ensure a browser is running on the pre-allocated port.
-   * Called before any child MCP tool invocation (lazy launch).
+   * Launch a browser and return its CDP port.
+   * Used by both lazy launch (CDP proxy callback) and explicit tool calls.
    */
-  private async ensureBrowserRunning(): Promise<void> {
-    // Already running?
-    if (this.browserInstance && !this.browserInstance.process.killed) {
-      return;
-    }
+  private async launchBrowserInternal(launchOpts?: LauncherOptions): Promise<number> {
+    const opts = launchOpts ?? this.opts.browser;
+    const port = await getFreePort();
 
-    // Tier 2: VS Code's browser is already running
-    if (this.vsCodeEnv.cdpPort) {
-      log("Tier 2: Using VS Code's CDP endpoint directly.");
-      return;
-    }
+    log("Launching browser...");
+    this.browserInstance = await launchBrowser(port, opts);
+    log(`Browser launched: ${this.browserInstance.browser.name} on internal port ${port}`);
 
-    // Prevent concurrent launches
-    if (this.browserLaunching) {
-      // Wait for ongoing launch
-      while (this.browserLaunching) {
-        await new Promise((r) => setTimeout(r, 100));
-      }
-      return;
-    }
-
-    this.browserLaunching = true;
-    try {
-      log("Lazy launching browser...");
-      this.browserInstance = await launchBrowser(this.preAllocatedPort, this.opts.browser);
-      log("Browser launched successfully.");
-    } catch (err) {
-      logError("Failed to launch browser", err);
-      throw err;
-    } finally {
-      this.browserLaunching = false;
-    }
+    return port;
   }
 
   /**
@@ -259,9 +197,10 @@ export class CoordinatorServer {
       }
 
       case "coordinator_status": {
-        const browserStatus = this.browserInstance?.process.killed === false
-          ? `Running (${this.browserInstance.browser.name}, port ${this.browserInstance.cdpPort})`
-          : "Not running (will launch on first browser tool call)";
+        const browserRunning = this.browserInstance?.process.killed === false;
+        const browserStatus = browserRunning
+          ? `Running (${this.browserInstance!.browser.name}, internal port ${this.browserInstance!.cdpPort})`
+          : "Not running (will launch on first CDP connection)";
 
         const tier = this.vsCodeEnv.cdpPort
           ? "Tier 2 (VS Code native CDP)"
@@ -269,15 +208,11 @@ export class CoordinatorServer {
             ? "Tier 1 (external browser + VS Code preview)"
             : "Standard (external browser)";
 
-        const childStatus = this.proxy?.isConnected ? "Connected" : "Disconnected";
-
         return textResult(
           [
             `Browser: ${browserStatus}`,
-            `CDP Port: ${this.preAllocatedPort}`,
+            `CDP Proxy Port: ${this.cdpProxy.getPort()}`,
             `VS Code: ${tier}`,
-            `Child MCP: ${childStatus}`,
-            `Child Tools: ${this.proxy?.getTools().length ?? 0}`,
           ].join("\n")
         );
       }
@@ -289,25 +224,20 @@ export class CoordinatorServer {
           this.browserInstance = null;
         }
 
-        // Allocate a new port if switching browsers
-        this.preAllocatedPort = await getFreePort();
-
         const launchOpts: LauncherOptions = {
           ...this.opts.browser,
           browserType: args.browserType as string | undefined,
           headless: args.headless as boolean | undefined,
         };
 
-        this.browserInstance = await launchBrowser(this.preAllocatedPort, launchOpts);
+        const internalPort = await this.launchBrowserInternal(launchOpts);
 
-        // Reconnect child MCP with new port
-        await this.proxy?.disconnect();
-        const childConfig = buildChildMcpConfig(this.preAllocatedPort, this.opts.childMcp);
-        this.proxy = new McpProxy(childConfig);
-        await this.proxy.connect();
+        // Update proxy backend and close existing connections
+        this.cdpProxy.setBackend(internalPort);
+        this.cdpProxy.closeConnections();
 
         return textResult(
-          `Browser launched: ${this.browserInstance.browser.name} on port ${this.preAllocatedPort}`
+          `Browser launched: ${this.browserInstance!.browser.name} (CDP proxy port ${this.cdpProxy.getPort()}, internal port ${internalPort})`
         );
       }
 
@@ -315,6 +245,8 @@ export class CoordinatorServer {
         if (this.browserInstance) {
           stopBrowser(this.browserInstance);
           this.browserInstance = null;
+          this.cdpProxy.clearBackend();
+          this.cdpProxy.closeConnections();
           return textResult("Browser stopped.");
         }
         return textResult("No browser is running.");
@@ -322,27 +254,24 @@ export class CoordinatorServer {
 
       case "coordinator_restart_browser": {
         if (this.browserInstance) {
-          const wasHeadless = this.opts.browser?.headless;
+          const prevOpts: LauncherOptions = {
+            ...this.opts.browser,
+          };
+
           stopBrowser(this.browserInstance);
           this.browserInstance = null;
 
-          this.preAllocatedPort = await getFreePort();
-          this.browserInstance = await launchBrowser(this.preAllocatedPort, {
-            ...this.opts.browser,
-            headless: wasHeadless,
-          });
+          const internalPort = await this.launchBrowserInternal(prevOpts);
 
-          // Reconnect child MCP
-          await this.proxy?.disconnect();
-          const childConfig = buildChildMcpConfig(this.preAllocatedPort, this.opts.childMcp);
-          this.proxy = new McpProxy(childConfig);
-          await this.proxy.connect();
+          // Update proxy backend and close existing connections
+          this.cdpProxy.setBackend(internalPort);
+          this.cdpProxy.closeConnections();
 
           return textResult(
-            `Browser restarted on port ${this.preAllocatedPort}`
+            `Browser restarted (CDP proxy port ${this.cdpProxy.getPort()}, internal port ${internalPort})`
           );
         }
-        return textResult("No browser was running. Use a browser tool to auto-launch.");
+        return textResult("No browser was running. Browser will launch on next CDP connection.");
       }
 
       default:
@@ -368,7 +297,8 @@ export class CoordinatorServer {
       this.browserInstance = null;
     }
 
-    await this.proxy?.disconnect();
+    await this.cdpProxy.close();
+    clearState();
 
     log("Coordinator shut down.");
   }

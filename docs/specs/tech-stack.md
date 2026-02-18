@@ -11,7 +11,7 @@
 
 | Package | Version | Purpose |
 |---------|---------|---------|
-| `@modelcontextprotocol/sdk` | ^1.12.0 | MCP server + client implementation |
+| `@modelcontextprotocol/sdk` | ^1.12.0 | MCP server implementation |
 
 ### Development
 
@@ -24,9 +24,10 @@
 
 ```
 browser-control-mcp/
-  cli.ts                     # Entry point, arg parsing, stdio transport
-  coordinator-server.ts      # Core MCP server, tool routing, lazy launch
-  mcp-proxy.ts               # Child MCP subprocess management
+  cli.ts                     # Entry point, arg parsing, wrap subcommand, stdio transport
+  coordinator-server.ts      # Core MCP server, coordinator tools, CDP proxy integration
+  cdp-proxy.ts               # TCP reverse proxy for CDP connections
+  state.ts                   # State file management (proxy port discovery)
   browser-launcher.ts        # Port allocation, browser spawn, lifecycle
   browser-detector.ts        # Cross-platform browser detection
   vscode-integration.ts      # VS Code environment detection, CDP discovery
@@ -53,14 +54,22 @@ browser-control-mcp/
 
 ```
 npx @anthropic-community/browser-coordinator-mcp [options]
+npx @anthropic-community/browser-coordinator-mcp wrap -- <command> [args...]
+
+Modes:
+  (default)               Start the coordinator MCP server
+  wrap                    Read state file, inject CDP port, run child command
 
 Options:
-  --mcp <package>       Child MCP server (default: @anthropic-ai/mcp-server-playwright)
-  --browser <type>      Preferred browser: chrome, edge, chromium, brave
-  --browser-path <path> Explicit browser executable path
-  --no-headless         Show browser UI (default: headless)
-  --no-vscode           Disable VS Code integration detection
-  --help, -h            Show help
+  --browser <type>        Preferred browser: chrome, edge, chromium, brave
+  --browser-path <path>   Explicit browser executable path
+  --no-headless           Show browser UI (default: headless)
+  --no-vscode             Disable VS Code integration detection
+  --help, -h              Show help
+
+Wrap template variables:
+  {cdp_port}              Replaced with the CDP proxy port number
+  {cdp_endpoint}          Replaced with http://localhost:<port>
 ```
 
 ## Environment Variables
@@ -74,6 +83,5 @@ Options:
 
 - All source files are in the project root (flat structure, no `src/` directory)
 - Output compiles to `dist/`
-- No linter or formatter configured yet
-- No test framework configured yet
+- Tests use Bun's built-in test runner (`bun test`)
 - No bundler — raw `tsc` compilation

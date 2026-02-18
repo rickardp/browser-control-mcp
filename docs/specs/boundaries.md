@@ -11,11 +11,12 @@ Rules and constraints for AI agents working in this codebase.
 
 ## Architecture Constraints
 
-- **The coordinator is a proxy, not a reimplementation.** Never duplicate browser automation logic that belongs in the child MCP. The coordinator manages lifecycle and forwards tool calls.
+- **The coordinator is a controller + CDP proxy, not an MCP proxy.** It manages browser lifecycle and provides a stable CDP port. It does not proxy MCP tool calls or merge tool lists.
+- **Two independent MCP entries.** The coordinator and child MCP are configured as separate MCP servers in `.mcp.json`. The `wrap` subcommand bridges them via the state file.
 - **Zero config by default.** User settings are optional, never required. The server must work with `npx @anthropic-community/browser-coordinator-mcp` and no flags.
-- **Lazy browser launch.** Browsers must not spawn at server startup. They launch on the first child MCP tool call. Coordinator-only tools (`coordinator_*`) must work without a running browser.
-- **Tool routing by prefix.** `coordinator_*` tools are handled directly. All other tools are forwarded to the child MCP.
-- **Single child MCP.** The coordinator spawns exactly one child MCP subprocess. It does not manage multiple child MCPs.
+- **Lazy browser launch.** Browsers must not spawn at server startup. They launch either when a CDP connection arrives at the proxy (lazy) or when `coordinator_launch_browser` is called (explicit).
+- **Stable CDP proxy port.** The proxy port stays the same when the browser switches (Chrome → Edge) or restarts. Child MCPs never need restarting due to port changes.
+- **Coordinator tools only.** The coordinator exposes only `coordinator_*` tools. Child MCP tools are managed by the child MCP independently.
 
 ## Browser Support
 
@@ -33,8 +34,8 @@ Rules and constraints for AI agents working in this codebase.
 
 - Do not add a `src/` directory — keep the flat file structure
 - Do not add a bundler (webpack, esbuild, rollup) — `tsc` is sufficient
-- Do not hardcode Playwright MCP as the only child — keep the `--mcp` flag working
+- Do not proxy MCP tool calls — the coordinator only exposes its own tools
 - Do not send `tools/list_changed` notifications — hosts don't reliably support it
 - Do not eagerly connect to CDP — let the child MCP handle its own CDP connection timing
 - Do not add configuration files (YAML, TOML, JSON config) — use CLI flags and env vars only
-- Do not add database or persistence — this is a stateless process
+- Do not add database or persistence beyond the state file — this is a stateless process

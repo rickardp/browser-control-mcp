@@ -16,7 +16,8 @@
   "include": [
     "cli.ts",
     "coordinator-server.ts",
-    "mcp-proxy.ts",
+    "cdp-proxy.ts",
+    "state.ts",
     "browser-launcher.ts",
     "browser-detector.ts",
     "vscode-integration.ts",

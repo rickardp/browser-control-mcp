@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import "./test-setup.js";
-import { parseArgs } from "./cli.js";
+import { parseArgs, parseWrapArgs, injectPort } from "./cli.js";
 
 describe("parseArgs", () => {
   let originalArgv: string[];
@@ -47,35 +47,6 @@ describe("parseArgs", () => {
     expect(opts.noVscode).toBe(true);
   });
 
-  test("parses --mcp with scoped package", () => {
-    setArgs("--mcp", "@anthropic-ai/mcp-server-playwright@latest");
-    const opts = parseArgs();
-    expect(opts.childMcp?.command).toBe("npx");
-    expect(opts.childMcp?.args).toContain("-y");
-    expect(opts.childMcp?.args).toContain("@anthropic-ai/mcp-server-playwright@latest");
-  });
-
-  test("parses --mcp with plain command", () => {
-    setArgs("--mcp", "node", "/path/to/server.js", "--flag");
-    const opts = parseArgs();
-    expect(opts.childMcp?.command).toBe("node");
-    expect(opts.childMcp?.args).toEqual(["/path/to/server.js", "--flag"]);
-  });
-
-  test("parses --mcp with relative path", () => {
-    setArgs("--mcp", "./my-mcp.js");
-    const opts = parseArgs();
-    expect(opts.childMcp?.command).toBe("npx");
-    expect(opts.childMcp?.args).toContain("./my-mcp.js");
-  });
-
-  test("parses --mcp with absolute path", () => {
-    setArgs("--mcp", "/usr/local/bin/my-mcp");
-    const opts = parseArgs();
-    expect(opts.childMcp?.command).toBe("npx");
-    expect(opts.childMcp?.args).toContain("/usr/local/bin/my-mcp");
-  });
-
   test("combines multiple flags", () => {
     setArgs("--browser", "chrome", "--no-headless", "--no-vscode");
     const opts = parseArgs();
@@ -83,12 +54,74 @@ describe("parseArgs", () => {
     expect(opts.browser?.headless).toBe(false);
     expect(opts.noVscode).toBe(true);
   });
+});
 
-  test("--mcp consumes remaining args", () => {
-    setArgs("--browser", "edge", "--mcp", "@playwright/mcp", "--arg1", "--arg2");
-    const opts = parseArgs();
-    expect(opts.browser?.browserType).toBe("edge");
-    expect(opts.childMcp?.args).toContain("--arg1");
-    expect(opts.childMcp?.args).toContain("--arg2");
+describe("parseWrapArgs", () => {
+  let originalArgv: string[];
+
+  beforeEach(() => {
+    originalArgv = process.argv;
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+  });
+
+  function setArgs(...args: string[]) {
+    process.argv = ["node", "cli.js", ...args];
+  }
+
+  test("returns null when not a wrap invocation", () => {
+    setArgs("--browser", "chrome");
+    expect(parseWrapArgs()).toBeNull();
+  });
+
+  test("returns null with no args", () => {
+    setArgs();
+    expect(parseWrapArgs()).toBeNull();
+  });
+
+  test("parses wrap with child command", () => {
+    setArgs("wrap", "--", "npx", "-y", "@playwright/mcp", "--cdp-endpoint={cdp_endpoint}");
+    const result = parseWrapArgs();
+    expect(result).toBeDefined();
+    expect(result!.childCommand).toBe("npx");
+    expect(result!.childArgs).toEqual(["-y", "@playwright/mcp", "--cdp-endpoint={cdp_endpoint}"]);
+  });
+
+  test("parses wrap with simple command", () => {
+    setArgs("wrap", "--", "node", "server.js");
+    const result = parseWrapArgs();
+    expect(result!.childCommand).toBe("node");
+    expect(result!.childArgs).toEqual(["server.js"]);
+  });
+});
+
+describe("injectPort", () => {
+  test("replaces {cdp_port} with port number", () => {
+    const result = injectPort(["--port={cdp_port}"], 41837);
+    expect(result).toEqual(["--port=41837"]);
+  });
+
+  test("replaces {cdp_endpoint} with full URL", () => {
+    const result = injectPort(["--cdp-endpoint={cdp_endpoint}"], 41837);
+    expect(result).toEqual(["--cdp-endpoint=http://localhost:41837"]);
+  });
+
+  test("replaces multiple occurrences", () => {
+    const result = injectPort(
+      ["--a={cdp_port}", "--b={cdp_endpoint}", "--c=plain"],
+      9222
+    );
+    expect(result).toEqual([
+      "--a=9222",
+      "--b=http://localhost:9222",
+      "--c=plain",
+    ]);
+  });
+
+  test("leaves args without templates unchanged", () => {
+    const result = injectPort(["--flag", "value"], 9222);
+    expect(result).toEqual(["--flag", "value"]);
   });
 });

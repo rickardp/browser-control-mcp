@@ -2,7 +2,7 @@ import { describe, test, expect, mock, beforeEach, afterEach } from "bun:test";
 import { EventEmitter } from "node:events";
 import {
   fsMock, osMock, cpMock, netMock,
-  sdkClientMock, sdkTransportMock, sdkServerMock,
+  sdkServerMock,
   registeredHandlers,
 } from "./test-setup.js";
 
@@ -10,10 +10,13 @@ const { CoordinatorServer } = await import("./coordinator-server.js");
 
 describe("CoordinatorServer", () => {
   let mockProc: any;
+  let mockTcpServer: any;
+  let connectionHandler: ((socket: any) => void) | null;
   const savedEnv: Record<string, string | undefined> = {};
 
   beforeEach(() => {
     registeredHandlers.clear();
+    connectionHandler = null;
 
     // Save and clear VS Code env vars so isInVSCode() returns false by default
     for (const key of ["TERM_PROGRAM", "VSCODE_INJECTION", "VSCODE_PID", "VSCODE_CWD", "VSCODE_CDP_PORT"]) {
@@ -21,23 +24,6 @@ describe("CoordinatorServer", () => {
       delete process.env[key];
     }
 
-    // Reset SDK client mocks
-    sdkClientMock.connect.mockClear();
-    sdkClientMock.connect.mockImplementation(async () => {});
-    sdkClientMock.close.mockClear();
-    sdkClientMock.close.mockImplementation(async () => {});
-    sdkClientMock.listTools.mockClear();
-    sdkClientMock.listTools.mockImplementation(async () => ({
-      tools: [
-        { name: "browser_navigate", description: "Navigate to URL", inputSchema: { type: "object" } },
-      ],
-    }));
-    sdkClientMock.callTool.mockClear();
-    sdkClientMock.callTool.mockImplementation(async () => ({
-      content: [{ type: "text", text: "navigated" }],
-    }));
-    sdkTransportMock.close.mockClear();
-    sdkTransportMock.close.mockImplementation(async () => {});
     sdkServerMock.connect.mockClear();
 
     // Reset filesystem mocks
@@ -45,19 +31,39 @@ describe("CoordinatorServer", () => {
     fsMock.existsSync.mockReturnValue(false);
     fsMock.readFileSync.mockReset();
     fsMock.readFileSync.mockReturnValue("");
+    fsMock.writeFileSync.mockClear();
+    fsMock.unlinkSync.mockClear();
     fsMock.mkdirSync.mockClear();
     fsMock.rmSync.mockClear();
 
     osMock.platform.mockReturnValue("darwin");
+    osMock.tmpdir.mockReturnValue("/tmp");
     cpMock.execSync.mockReset();
     cpMock.execSync.mockImplementation(() => { throw new Error("not found"); });
 
-    // Configure net mock for getFreePort
-    let portCounter = 9500;
-    netMock.createServer.mockImplementation(() => {
+    // Configure net mock for CDP proxy (createServer) and getFreePort
+    let serverCallCount = 0;
+    netMock.createServer.mockImplementation((onConnection?: (socket: any) => void) => {
+      serverCallCount++;
+
+      if (onConnection) {
+        // This is the CDP proxy's server (has a connection callback)
+        connectionHandler = onConnection;
+        mockTcpServer = new EventEmitter() as any;
+        mockTcpServer.listen = mock((_port: number, _host: string, cb: () => void) => {
+          setTimeout(cb, 0);
+          return mockTcpServer;
+        });
+        mockTcpServer.address = mock(() => ({ port: 41837 }));
+        mockTcpServer.close = mock((cb: () => void) => { cb(); });
+        mockTcpServer.on = mock(function (this: any) { return this; });
+        return mockTcpServer;
+      }
+
+      // This is getFreePort (no connection callback)
       const srv: any = {
         listen(_p: number, cb: () => void) { setTimeout(cb, 0); return srv; },
-        address() { return { port: portCounter++ }; },
+        address() { return { port: 9500 + serverCallCount }; },
         close(cb: (err?: Error) => void) { cb(); },
         on() { return srv; },
       };
@@ -68,6 +74,7 @@ describe("CoordinatorServer", () => {
       const socket = new EventEmitter() as any;
       socket.destroy = mock();
       socket.setTimeout = mock();
+      socket.pipe = mock(() => socket);
       setTimeout(() => cb(), 0);
       return socket;
     });
@@ -82,7 +89,7 @@ describe("CoordinatorServer", () => {
       mockProc.stdout = new EventEmitter();
       mockProc.pid = 12345;
 
-      // Auto-emit CDP URL after a short delay to make launchBrowser resolve
+      // Auto-emit CDP URL after a short delay
       setTimeout(() => {
         mockProc.stderr.emit(
           "data",
@@ -93,7 +100,7 @@ describe("CoordinatorServer", () => {
       return mockProc;
     });
 
-    // Make Chrome detectable for browser launch
+    // Make Chrome detectable
     fsMock.existsSync.mockImplementation((p: string) =>
       p === "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     );
@@ -119,24 +126,28 @@ describe("CoordinatorServer", () => {
     expect(server).toBeDefined();
   });
 
-  test("initialize connects child MCP proxy", async () => {
+  test("initialize starts CDP proxy and writes state file", async () => {
     const server = new CoordinatorServer();
     await server.initialize();
 
-    expect(sdkClientMock.connect).toHaveBeenCalledTimes(1);
-    expect(sdkClientMock.listTools).toHaveBeenCalledTimes(1);
+    // CDP proxy server should have been created
+    expect(netMock.createServer).toHaveBeenCalled();
+    // State file should have been written
+    expect(fsMock.writeFileSync).toHaveBeenCalled();
+    const stateData = JSON.parse(fsMock.writeFileSync.mock.calls[0][1] as string);
+    expect(stateData.port).toBe(41837);
+    expect(stateData.pid).toBe(process.pid);
   });
 
   test("initialize uses VS Code CDP port when detected", async () => {
     process.env.TERM_PROGRAM = "vscode";
     process.env.VSCODE_CDP_PORT = "9333";
 
-    netMock.createServer.mockClear();
     const server = new CoordinatorServer();
     await server.initialize();
 
-    // Should NOT call createServer (getFreePort) since VS Code provides port
-    expect(netMock.createServer).not.toHaveBeenCalled();
+    // State file should still be written with proxy port
+    expect(fsMock.writeFileSync).toHaveBeenCalled();
   });
 
   test("initialize skips VS Code detection with noVscode option", async () => {
@@ -146,8 +157,8 @@ describe("CoordinatorServer", () => {
     const server = new CoordinatorServer({ noVscode: true });
     await server.initialize();
 
-    // Should call getFreePort even though VS Code env is set
-    expect(netMock.createServer).toHaveBeenCalled();
+    // Should still write state file
+    expect(fsMock.writeFileSync).toHaveBeenCalled();
   });
 
   test("getServer returns the MCP server", () => {
@@ -163,7 +174,7 @@ describe("CoordinatorServer", () => {
       await server.initialize();
     });
 
-    test("tools/list merges coordinator and child tools", async () => {
+    test("tools/list returns only coordinator tools", async () => {
       const handler = getListToolsHandler();
       expect(handler).toBeDefined();
 
@@ -175,7 +186,10 @@ describe("CoordinatorServer", () => {
       expect(toolNames).toContain("coordinator_launch_browser");
       expect(toolNames).toContain("coordinator_stop_browser");
       expect(toolNames).toContain("coordinator_restart_browser");
-      expect(toolNames).toContain("browser_navigate");
+      expect(toolNames).toHaveLength(5);
+
+      // Should NOT contain child MCP tools
+      expect(toolNames).not.toContain("browser_navigate");
     });
 
     test("coordinator_list_browsers returns detected browsers", async () => {
@@ -208,8 +222,31 @@ describe("CoordinatorServer", () => {
 
       const text = result.content[0].text;
       expect(text).toContain("Browser:");
-      expect(text).toContain("CDP Port:");
-      expect(text).toContain("Child MCP:");
+      expect(text).toContain("CDP Proxy Port:");
+      expect(text).toContain("VS Code:");
+    });
+
+    test("coordinator_status does not mention Child MCP", async () => {
+      const handler = getCallToolHandler();
+      const result = await handler!({
+        params: { name: "coordinator_status", arguments: {} },
+      });
+
+      const text = result.content[0].text;
+      expect(text).not.toContain("Child MCP:");
+    });
+
+    test("coordinator_launch_browser launches and sets proxy backend", async () => {
+      const handler = getCallToolHandler();
+      cpMock.spawn.mockClear();
+
+      const result = await handler!({
+        params: { name: "coordinator_launch_browser", arguments: {} },
+      });
+
+      expect(cpMock.spawn).toHaveBeenCalled();
+      expect(result.content[0].text).toContain("Browser launched");
+      expect(result.content[0].text).toContain("CDP proxy port");
     });
 
     test("coordinator_stop_browser when no browser running", async () => {
@@ -228,23 +265,6 @@ describe("CoordinatorServer", () => {
       });
 
       expect(result.content[0].text).toContain("No browser was running");
-    });
-
-    test("child tool calls trigger lazy browser launch", async () => {
-      const handler = getCallToolHandler();
-      cpMock.spawn.mockClear();
-
-      await handler!({
-        params: { name: "browser_navigate", arguments: { url: "https://example.com" } },
-      });
-
-      // Browser should have been launched (spawn called)
-      expect(cpMock.spawn).toHaveBeenCalled();
-      // And the tool call should have been forwarded
-      expect(sdkClientMock.callTool).toHaveBeenCalledWith({
-        name: "browser_navigate",
-        arguments: { url: "https://example.com" },
-      });
     });
 
     test("unknown tool returns error message", async () => {
@@ -267,28 +287,29 @@ describe("CoordinatorServer", () => {
   });
 
   describe("shutdown()", () => {
-    test("stops browser and disconnects proxy", async () => {
+    test("closes CDP proxy and clears state", async () => {
       const server = new CoordinatorServer();
       await server.initialize();
 
-      // Trigger a browser launch via a child tool call
-      const handler = getCallToolHandler();
-      if (handler) {
-        cpMock.spawn.mockClear();
-        await handler({
-          params: { name: "browser_navigate", arguments: {} },
-        });
-      }
+      // Make state file appear to exist for clearState
+      const prevExistsSync = fsMock.existsSync.getMockImplementation();
+      fsMock.existsSync.mockImplementation((p: string) => {
+        if (p.includes("state.json")) return true;
+        return prevExistsSync ? prevExistsSync(p) : false;
+      });
 
       await server.shutdown();
-      expect(sdkClientMock.close).toHaveBeenCalled();
+      expect(mockTcpServer.close).toHaveBeenCalled();
+      expect(fsMock.unlinkSync).toHaveBeenCalled();
     });
 
     test("shutdown without browser is safe", async () => {
       const server = new CoordinatorServer();
       await server.initialize();
       await server.shutdown();
-      expect(sdkClientMock.close).toHaveBeenCalled();
+
+      // Should not throw
+      expect(mockTcpServer.close).toHaveBeenCalled();
     });
   });
 });

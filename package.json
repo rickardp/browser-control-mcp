@@ -1,7 +1,7 @@
 {
   "name": "@rickardp/browser-coordinator-mcp",
   "version": "0.1.0",
-  "description": "MCP server that coordinates browser lifecycle and proxies browser automation tools",
+  "description": "MCP server that manages browser lifecycle and provides a stable CDP proxy port for browser automation",
   "type": "module",
   "main": "dist/cli.js",
   "bin": {
