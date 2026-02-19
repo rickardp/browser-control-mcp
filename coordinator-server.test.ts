@@ -4,6 +4,7 @@ import {
   fsMock, osMock, cpMock, netMock,
   sdkServerMock,
   registeredHandlers,
+  cdpClientMock,
 } from "./test-setup.js";
 
 const { CoordinatorServer } = await import("./coordinator-server.js");
@@ -190,7 +191,8 @@ describe("CoordinatorServer", () => {
       expect(toolNames).toContain("coordinator_select_element");
       expect(toolNames).toContain("coordinator_get_dom");
       expect(toolNames).toContain("coordinator_screenshot");
-      expect(toolNames).toHaveLength(9);
+      expect(toolNames).toContain("coordinator_fetch");
+      expect(toolNames).toHaveLength(10);
 
       // Should NOT contain child MCP tools
       expect(toolNames).not.toContain("browser_navigate");
@@ -287,6 +289,156 @@ describe("CoordinatorServer", () => {
       });
 
       expect(result.content[0].text).toContain("Unknown coordinator tool");
+    });
+
+    describe("coordinator_screenshot", () => {
+      const FAKE_BASE64 = Buffer.from("fake-png-data").toString("base64");
+
+      beforeEach(() => {
+        cdpClientMock.send.mockReset();
+        cdpClientMock.close.mockClear();
+        fsMock.mkdirSync.mockClear();
+        fsMock.writeFileSync.mockClear();
+
+        // Default: Page.captureScreenshot returns base64 data
+        cdpClientMock.send.mockImplementation(async (method: string) => {
+          if (method === "Page.captureScreenshot") {
+            return { data: FAKE_BASE64 };
+          }
+          return {};
+        });
+      });
+
+      test("saves screenshot to default workspace-stable directory", async () => {
+        const handler = getCallToolHandler();
+        const result = await handler!({
+          params: { name: "coordinator_screenshot", arguments: {} },
+        });
+
+        // Should create directory and write file
+        expect(fsMock.mkdirSync).toHaveBeenCalled();
+        const dirArg = fsMock.mkdirSync.mock.calls[0][0] as string;
+        expect(dirArg).toContain("browser-coordinator");
+        expect(dirArg).toContain("screenshots");
+
+        expect(fsMock.writeFileSync).toHaveBeenCalled();
+        const filePath = fsMock.writeFileSync.mock.calls[0][0] as string;
+        expect(filePath).toContain("screenshot-");
+        expect(filePath).toEndWith(".png");
+
+        // Returns both text and image content
+        expect(result.content).toHaveLength(2);
+        expect(result.content[0].type).toBe("text");
+        expect(result.content[0].text).toContain("Screenshot saved to");
+        expect(result.content[1].type).toBe("image");
+        expect(result.content[1].data).toBe(FAKE_BASE64);
+      });
+
+      test("uses outputDir when provided", async () => {
+        const handler = getCallToolHandler();
+        await handler!({
+          params: {
+            name: "coordinator_screenshot",
+            arguments: { outputDir: "/custom/screenshots" },
+          },
+        });
+
+        const dirArg = fsMock.mkdirSync.mock.calls[0][0] as string;
+        expect(dirArg).toBe("/custom/screenshots");
+
+        const filePath = fsMock.writeFileSync.mock.calls[0][0] as string;
+        expect(filePath).toStartWith("/custom/screenshots/");
+      });
+
+      test("clip takes precedence over selector", async () => {
+        const handler = getCallToolHandler();
+        const result = await handler!({
+          params: {
+            name: "coordinator_screenshot",
+            arguments: {
+              clip: { x: 10, y: 20, width: 100, height: 200 },
+              selector: "#ignored",
+            },
+          },
+        });
+
+        // Should NOT call Runtime.evaluate (no selector lookup)
+        const sendCalls = cdpClientMock.send.mock.calls;
+        const evalCalls = sendCalls.filter((c: any[]) => c[0] === "Runtime.evaluate");
+        expect(evalCalls).toHaveLength(0);
+
+        // Should call Page.captureScreenshot with clip
+        const captureCalls = sendCalls.filter((c: any[]) => c[0] === "Page.captureScreenshot");
+        expect(captureCalls).toHaveLength(1);
+        expect(captureCalls[0][1]).toEqual({
+          format: "png",
+          clip: { x: 10, y: 20, width: 100, height: 200, scale: 1 },
+        });
+
+        expect(result.content).toHaveLength(2);
+      });
+
+      test("fullPage passes captureBeyondViewport to CDP", async () => {
+        const handler = getCallToolHandler();
+        await handler!({
+          params: {
+            name: "coordinator_screenshot",
+            arguments: { fullPage: true },
+          },
+        });
+
+        const sendCalls = cdpClientMock.send.mock.calls;
+        const captureCalls = sendCalls.filter((c: any[]) => c[0] === "Page.captureScreenshot");
+        expect(captureCalls).toHaveLength(1);
+        expect(captureCalls[0][1]).toEqual({
+          format: "png",
+          captureBeyondViewport: true,
+        });
+      });
+
+      test("fullPage is ignored when clip is set", async () => {
+        const handler = getCallToolHandler();
+        await handler!({
+          params: {
+            name: "coordinator_screenshot",
+            arguments: {
+              clip: { x: 0, y: 0, width: 50, height: 50 },
+              fullPage: true,
+            },
+          },
+        });
+
+        const sendCalls = cdpClientMock.send.mock.calls;
+        const captureCalls = sendCalls.filter((c: any[]) => c[0] === "Page.captureScreenshot");
+        expect(captureCalls[0][1]).toHaveProperty("clip");
+        expect(captureCalls[0][1]).not.toHaveProperty("captureBeyondViewport");
+      });
+
+      test("returns both text (file path) and image content", async () => {
+        const handler = getCallToolHandler();
+        const result = await handler!({
+          params: { name: "coordinator_screenshot", arguments: { format: "jpeg" } },
+        });
+
+        expect(result.content).toHaveLength(2);
+        expect(result.content[0].type).toBe("text");
+        expect(result.content[0].text).toContain(".jpg");
+        expect(result.content[1].type).toBe("image");
+        expect(result.content[1].mimeType).toBe("image/jpeg");
+      });
+
+      test("error when CDP fails", async () => {
+        cdpClientMock.send.mockRejectedValue(new Error("CDP connection lost"));
+
+        const handler = getCallToolHandler();
+        const result = await handler!({
+          params: { name: "coordinator_screenshot", arguments: {} },
+        });
+
+        expect(result.content).toHaveLength(1);
+        expect(result.content[0].text).toContain("Screenshot failed");
+        expect(result.content[0].text).toContain("CDP connection lost");
+      });
     });
   });
 

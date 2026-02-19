@@ -1,3 +1,7 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+import * as crypto from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   ListToolsRequestSchema,
@@ -21,7 +25,7 @@ import {
 import { detectBrowsers } from "./browser-detector.js";
 import { detectVSCodeAsync, type VSCodeEnvironment } from "./vscode-integration.js";
 import { sendIpcRequest } from "./ipc-socket.js";
-import { connectToTarget, getTargets, type CdpClient } from "./cdp-client.js";
+import { connectToTarget, getTargets, CdpClient } from "./cdp-client.js";
 import { log, logError } from "./log.js";
 
 export interface CoordinatorOptions {
@@ -129,21 +133,71 @@ const COORDINATOR_TOOLS: Tool[] = [
   {
     name: "coordinator_screenshot",
     description:
-      "Capture a screenshot of the current page or a specific element. Returns a base64-encoded image.",
+      "Capture a screenshot of the current page or a specific region. Saves to disk and returns the file path and image.",
     inputSchema: {
       type: "object",
       properties: {
         selector: {
           type: "string",
-          description: "CSS selector for a specific element (optional — captures full page if omitted)",
+          description: "CSS selector for a specific element (optional)",
         },
         format: {
           type: "string",
           description: "Image format (default: png)",
           enum: ["png", "jpeg"],
         },
+        clip: {
+          type: "object",
+          description: "Explicit pixel crop rect. Takes precedence over selector.",
+          properties: {
+            x: { type: "number" },
+            y: { type: "number" },
+            width: { type: "number" },
+            height: { type: "number" },
+          },
+          required: ["x", "y", "width", "height"],
+        },
+        fullPage: {
+          type: "boolean",
+          description: "Capture entire scrollable page, not just viewport (default: false). Ignored when clip or selector is set.",
+        },
+        outputDir: {
+          type: "string",
+          description: "Directory to save screenshot. Defaults to a workspace-stable temp directory.",
+        },
       },
       required: [],
+    },
+  },
+  {
+    name: "coordinator_fetch",
+    description:
+      "Execute an HTTP request through the browser's network stack. " +
+      "Preserves cookies, user agent, and session state. Bypasses CORS. " +
+      "Returns JSON with status, statusText, headers, and body.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "The URL to fetch" },
+        method: {
+          type: "string",
+          description: "HTTP method (default: GET)",
+        },
+        headers: {
+          type: "object",
+          description: "Request headers as key-value pairs",
+          additionalProperties: { type: "string" },
+        },
+        body: {
+          type: "string",
+          description: "Request body (for POST, PUT, PATCH, etc.)",
+        },
+        timeout: {
+          type: "number",
+          description: "Timeout in milliseconds (default: 30000)",
+        },
+      },
+      required: ["url"],
     },
   },
 ];
@@ -158,6 +212,24 @@ function imageResult(base64: string, mimeType: "image/png" | "image/jpeg"): Call
   return {
     content: [{ type: "image", data: base64, mimeType } as ImageContent],
   };
+}
+
+/**
+ * Workspace-stable screenshot directory under os.tmpdir().
+ * Uses a SHA-256 hash of cwd (truncated to 12 hex chars) so each project
+ * gets its own screenshot folder, matching the state.ts convention.
+ */
+function getScreenshotDir(): string {
+  const hash = crypto.createHash("sha256").update(process.cwd()).digest("hex").slice(0, 12);
+  return path.join(os.tmpdir(), "browser-coordinator", "screenshots", hash);
+}
+
+/**
+ * Generate a filesystem-safe screenshot filename with ISO timestamp.
+ */
+function screenshotFilename(format: string): string {
+  const ts = new Date().toISOString().replace(/:/g, "-");
+  return `screenshot-${ts}.${format === "jpeg" ? "jpg" : format}`;
 }
 
 // ─── Element picker script ──────────────────────────────────────────────────
@@ -647,14 +719,20 @@ export class CoordinatorServer {
       case "coordinator_screenshot": {
         const selector = args.selector as string | undefined;
         const format = (args.format as string) ?? "png";
+        const clipArg = args.clip as { x: number; y: number; width: number; height: number } | undefined;
+        const fullPage = (args.fullPage as boolean) ?? false;
+        const outputDir = args.outputDir as string | undefined;
 
         try {
           const { client, cleanup } = await this.getCdpClient();
           try {
             let clip: { x: number; y: number; width: number; height: number; scale: number } | undefined;
+            let captureBeyondViewport = false;
 
-            // If selector provided, get the element's bounding box
-            if (selector) {
+            // Precedence: clip > selector > viewport/fullPage
+            if (clipArg) {
+              clip = { ...clipArg, scale: 1 };
+            } else if (selector) {
               const boxResult = await client.send("Runtime.evaluate", {
                 expression: `
                   (function() {
@@ -673,24 +751,185 @@ export class CoordinatorServer {
               }
               const box = JSON.parse(boxJson);
               clip = { ...box, scale: 1 };
+            } else if (fullPage) {
+              captureBeyondViewport = true;
             }
 
             const result = await client.send("Page.captureScreenshot", {
               format,
               ...(clip ? { clip } : {}),
+              ...(captureBeyondViewport ? { captureBeyondViewport: true } : {}),
             }) as { data?: string };
 
             if (!result?.data) {
               return textResult("Screenshot returned no data.");
             }
 
+            // Save to disk
+            const dir = outputDir ?? getScreenshotDir();
+            fs.mkdirSync(dir, { recursive: true });
+            const filename = screenshotFilename(format);
+            const filePath = path.join(dir, filename);
+            fs.writeFileSync(filePath, Buffer.from(result.data, "base64"));
+
             const mimeType = format === "jpeg" ? "image/jpeg" : "image/png";
-            return imageResult(result.data, mimeType);
+            return {
+              content: [
+                { type: "text", text: `Screenshot saved to ${filePath}` } as TextContent,
+                { type: "image", data: result.data, mimeType } as ImageContent,
+              ],
+            };
           } finally {
             cleanup();
           }
         } catch (err) {
           return textResult(`Screenshot failed: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+
+      case "coordinator_fetch": {
+        const url = args.url as string;
+        if (!url) {
+          return textResult("Error: url is required");
+        }
+
+        const method = (args.method as string) ?? "GET";
+        const headers = (args.headers as Record<string, string>) ?? {};
+        const body = args.body as string | undefined;
+        const timeout = (args.timeout as number) ?? 30000;
+
+        let parsedUrl: URL;
+        try {
+          parsedUrl = new URL(url);
+        } catch {
+          return textResult(`Error: invalid URL: ${url}`);
+        }
+        const origin = parsedUrl.origin;
+
+        let mainClient: CdpClient | undefined;
+        let fetchClient: CdpClient | undefined;
+        let targetId: string | undefined;
+
+        try {
+          // Get main CDP client to issue Target commands
+          const conn = await this.getCdpClient();
+          mainClient = conn.client;
+
+          // Create a new background tab
+          const createResult = await mainClient.send("Target.createTarget", {
+            url: "about:blank",
+          }) as { targetId: string };
+          targetId = createResult.targetId;
+
+          // Find the new target's WebSocket URL
+          const proxyPort = this.cdpProxy.getPort();
+          const backendPort = this.cdpProxy.getBackendPort();
+          const port = backendPort ?? proxyPort;
+          const targets = await getTargets(port);
+          const newTarget = targets.find((t) => t.id === targetId);
+
+          if (!newTarget) {
+            return textResult("Error: failed to find newly created tab");
+          }
+
+          // Connect to the new tab
+          fetchClient = new CdpClient();
+          await fetchClient.connect(newTarget.webSocketDebuggerUrl);
+
+          // Enable Page domain and navigate to origin
+          await fetchClient.send("Page.enable");
+
+          const navDone = new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              reject(new Error(`Navigation to origin timed out after ${timeout}ms`));
+            }, timeout);
+
+            fetchClient!.on("Page.frameNavigated", (params: Record<string, unknown>) => {
+              const frame = params.frame as { parentId?: string; url?: string } | undefined;
+              // Only care about the main frame (no parentId)
+              if (!frame?.parentId) {
+                clearTimeout(timer);
+                resolve();
+              }
+            });
+          });
+
+          await fetchClient.send("Page.navigate", { url: `${origin}/` });
+          await navDone;
+
+          // Verify we're on the right origin (in case of redirect)
+          const locationResult = await fetchClient.send("Runtime.evaluate", {
+            expression: "window.location.origin",
+            returnByValue: true,
+          }) as { result?: { value?: string } };
+
+          const actualOrigin = locationResult?.result?.value;
+          if (actualOrigin !== origin) {
+            return textResult(
+              `Error: origin ${origin}/ redirected to ${actualOrigin}. ` +
+              `Navigate to the target origin first with coordinator_navigate, then retry.`
+            );
+          }
+
+          // Stop page loading to minimize side effects
+          await fetchClient.send("Page.stopLoading");
+
+          // Build and execute fetch
+          const fetchScript = `(async () => {
+  const resp = await fetch(${JSON.stringify(url)}, {
+    method: ${JSON.stringify(method)},
+    headers: ${JSON.stringify(headers)},
+    ${body !== undefined ? `body: ${JSON.stringify(body)},` : ""}
+    credentials: 'include',
+  });
+  const hdrs = {};
+  resp.headers.forEach((v, k) => { hdrs[k] = v; });
+  return JSON.stringify({
+    status: resp.status,
+    statusText: resp.statusText,
+    headers: hdrs,
+    body: await resp.text(),
+    url: resp.url,
+    redirected: resp.redirected,
+  });
+})()`;
+
+          const fetchResult = await fetchClient.send("Runtime.evaluate", {
+            expression: fetchScript,
+            awaitPromise: true,
+            returnByValue: true,
+            timeout,
+          }) as { result?: { value?: string }; exceptionDetails?: { text?: string; exception?: { description?: string } } };
+
+          if (fetchResult.exceptionDetails) {
+            const errMsg = fetchResult.exceptionDetails.exception?.description
+              ?? fetchResult.exceptionDetails.text
+              ?? "Unknown fetch error";
+            return textResult(`Fetch failed: ${errMsg}`);
+          }
+
+          const value = fetchResult?.result?.value;
+          if (!value) {
+            return textResult("Fetch returned no result.");
+          }
+
+          return textResult(value);
+        } catch (err) {
+          return textResult(`coordinator_fetch failed: ${err instanceof Error ? err.message : err}`);
+        } finally {
+          if (fetchClient) {
+            fetchClient.close();
+          }
+          if (targetId && mainClient) {
+            try {
+              await mainClient.send("Target.closeTarget", { targetId });
+            } catch {
+              // Best-effort cleanup
+            }
+          }
+          if (mainClient) {
+            mainClient.close();
+          }
         }
       }
 

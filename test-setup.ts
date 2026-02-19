@@ -13,7 +13,7 @@ import { mock } from "bun:test";
 export const fsMock = {
   existsSync: mock((_path: string): boolean => false),
   readFileSync: mock((_path: string, _enc?: string): string => ""),
-  writeFileSync: mock((_path: string, _data: string) => {}),
+  writeFileSync: mock((_path: string, _data: string | Buffer) => {}),
   unlinkSync: mock((_path: string) => {}),
   mkdirSync: mock((_path: string, _opts?: any) => {}),
   rmSync: mock((_path: string, _opts?: any) => {}),
@@ -69,4 +69,30 @@ mock.module("@modelcontextprotocol/sdk/types.js", () => ({
 
 mock.module("@modelcontextprotocol/sdk/server/stdio.js", () => ({
   StdioServerTransport: class MockStdioServerTransport {},
+}));
+
+// ─── cdp-client ──────────────────────────────────────────────────────────────
+export const cdpClientMock = {
+  send: mock(async (_method: string, _params?: any): Promise<any> => ({})),
+  close: mock(() => {}),
+};
+
+mock.module("./cdp-client.js", () => ({
+  connectToTarget: mock(async () => ({
+    client: cdpClientMock,
+    target: {
+      id: "1",
+      type: "page",
+      title: "test",
+      url: "about:blank",
+      webSocketDebuggerUrl: "ws://127.0.0.1:9500/devtools/page/1",
+    },
+  })),
+  getTargets: mock(async () => []),
+  CdpClient: class MockCdpClient {
+    connect = mock(async () => {});
+    send = cdpClientMock.send;
+    close = cdpClientMock.close;
+    on = mock(() => {});
+  },
 }));
