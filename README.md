@@ -4,6 +4,8 @@
 
 Browser Coordinator MCP manages browser lifecycle and exposes a stable CDP port so any browser automation MCP (like Playwright MCP) can connect — without hardcoded ports, manual browser launches, or restarts when you switch browsers.
 
+Supports **Chrome, Edge, Chromium, Brave** (via CDP) and **Firefox** (via WebDriver BiDi). No browser downloads — uses whatever you already have installed.
+
 ## Integration
 
 Add both entries to your `.mcp.json` (Claude Code) or MCP client config:
@@ -83,6 +85,26 @@ Google's Chrome DevTools MCP also connects through the coordinator:
 }
 ```
 
+### Firefox
+
+Use Firefox instead of Chromium. The coordinator connects via WebDriver BiDi (Firefox 129+):
+
+```json
+{
+  "mcpServers": {
+    "browser": {
+      "command": "npx",
+      "args": [
+        "-y", "@anthropic-community/browser-coordinator-mcp",
+        "--browser", "firefox"
+      ]
+    }
+  }
+}
+```
+
+All `coordinator_*` tools work with Firefox. Note: child MCPs like Playwright MCP require CDP and won't work through the proxy when Firefox is active — use the coordinator's own tools instead, or switch back to a Chromium browser.
+
 ### Custom child MCP
 
 Any CDP-based MCP server works. Use `wrap` to inject the proxy port into child args:
@@ -116,11 +138,10 @@ The coordinator and child MCP are **two independent MCP servers**. The host sees
 Host (Claude Code / Claude Desktop)
   ├── Coordinator MCP ─── coordinator_* tools
   │       │
-  │       ▼
-  │   CDP Reverse Proxy (stable port)
-  │       │
-  │       ▼
-  │   Browser (Chrome / Edge / Chromium / Brave)
+  │       ├── CDP ──→ Chromium (Chrome / Edge / Chromium / Brave)
+  │       └── BiDi ─→ Firefox  (--browser firefox)
+  │
+  │   CDP Reverse Proxy (stable port, Chromium only)
   │       ▲
   │       │ CDP
   └── Child MCP (Playwright) ─── browser_* tools
@@ -136,11 +157,17 @@ The `wrap` subcommand bridges the two servers — it reads a state file to disco
 
 | Tool | Description |
 |------|-------------|
-| `coordinator_list_browsers` | Scan the system for installed CDP-capable browsers |
-| `coordinator_status` | Show running browser, CDP proxy port, VS Code tier |
-| `coordinator_launch_browser` | Launch or relaunch with specific browser/options |
+| `coordinator_list_browsers` | Scan the system for installed browsers (CDP + BiDi) |
+| `coordinator_status` | Show running browser, engine, proxy port, VS Code tier |
+| `coordinator_launch_browser` | Launch or relaunch — accepts `chrome`, `edge`, `chromium`, `brave`, `firefox` |
 | `coordinator_stop_browser` | Stop the running browser |
 | `coordinator_restart_browser` | Kill and relaunch — proxy port stays the same |
+| `coordinator_navigate` | Navigate to a URL (VS Code Simple Browser, CDP, or BiDi) |
+| `coordinator_select_element` | Interactive element picker — returns tag, selector, bounding box |
+| `coordinator_get_dom` | Get rendered DOM as HTML, with shadow DOM flattened |
+| `coordinator_get_markdown` | Get page content as clean Markdown (via Turndown.js) |
+| `coordinator_screenshot` | Capture screenshot (full page, element, or clip rect) |
+| `coordinator_fetch` | HTTP request through the browser's network stack (cookies, no CORS) |
 
 ## CLI Reference
 
@@ -154,8 +181,8 @@ MODES:
   wrap        Read coordinator state, inject CDP port into child command, run it
 
 OPTIONS:
-  --browser <type>      Preferred browser: chrome, edge, chromium, brave
-                        Default: auto-detect (first available)
+  --browser <type>      Preferred browser: chrome, edge, chromium, brave, firefox
+                        Default: auto-detect (first Chromium found)
   --browser-path <path> Explicit path to browser executable
   --no-headless         Launch browser with visible UI (default: headless)
   --no-vscode           Skip VS Code detection, force external browser
@@ -181,7 +208,7 @@ Inside VS Code's integrated terminal, the coordinator detects the environment au
 
 ## Browser Detection
 
-The coordinator scans platform-specific paths for Chrome, Edge, Chromium, and Brave:
+The coordinator scans platform-specific paths for Chrome, Edge, Chromium, Brave, and Firefox:
 
 | Platform | Search locations |
 |----------|-----------------|
