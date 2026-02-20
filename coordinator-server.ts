@@ -25,7 +25,11 @@ import {
 import { detectBrowsers } from "./browser-detector.js";
 import { detectVSCodeAsync, type VSCodeEnvironment } from "./vscode-integration.js";
 import { sendIpcRequest } from "./ipc-socket.js";
-import { connectToTarget, getTargets, CdpClient } from "./cdp-client.js";
+import {
+  type BrowserSession,
+  createCdpSession,
+  createBidiSession,
+} from "./browser-session.js";
 import { log, logError } from "./log.js";
 
 export interface CoordinatorOptions {
@@ -41,7 +45,7 @@ const COORDINATOR_TOOLS: Tool[] = [
   {
     name: "coordinator_list_browsers",
     description:
-      "List all CDP-capable browsers detected on this system (Chrome, Edge, Chromium, Brave).",
+      "List all detected browsers on this system (Chrome, Edge, Chromium, Brave, Firefox).",
     inputSchema: { type: "object", properties: {}, required: [] },
   },
   {
@@ -59,8 +63,8 @@ const COORDINATOR_TOOLS: Tool[] = [
       properties: {
         browserType: {
           type: "string",
-          description: "Browser type: chrome, edge, chromium, brave. If omitted and VS Code extension is active, uses VS Code's browser.",
-          enum: ["chrome", "edge", "chromium", "brave"],
+          description: "Browser type: chrome, edge, chromium, brave, firefox. If omitted and VS Code extension is active, uses VS Code's browser.",
+          enum: ["chrome", "edge", "chromium", "brave", "firefox"],
         },
         headless: {
           type: "boolean",
@@ -84,7 +88,7 @@ const COORDINATOR_TOOLS: Tool[] = [
   {
     name: "coordinator_navigate",
     description:
-      "Navigate the browser to a URL. If VS Code extension is active, opens in Simple Browser. Otherwise sends Page.navigate via CDP.",
+      "Navigate the browser to a URL. If VS Code extension is active, opens in Simple Browser. Otherwise navigates via the browser protocol (CDP or BiDi).",
     inputSchema: {
       type: "object",
       properties: {
@@ -114,7 +118,7 @@ const COORDINATOR_TOOLS: Tool[] = [
   {
     name: "coordinator_get_dom",
     description:
-      "Get the DOM tree or a subtree as HTML. If no selector is given, returns the entire document HTML (truncated to a reasonable size).",
+      "Get the rendered DOM tree or a subtree as HTML. Includes shadow DOM content when the browser supports Element.getHTML() (Chrome 124+, Firefox 128+). If no selector is given, returns the entire document HTML (truncated to a reasonable size).",
     inputSchema: {
       type: "object",
       properties: {
@@ -170,6 +174,22 @@ const COORDINATOR_TOOLS: Tool[] = [
     },
   },
   {
+    name: "coordinator_get_markdown",
+    description:
+      "Get the page content as Markdown. Uses Turndown.js to convert rendered HTML to clean Markdown. " +
+      "Strips scripts, styles, SVGs, and hidden elements. Useful for extracting readable content from web pages.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: {
+          type: "string",
+          description: "CSS selector to convert a specific element (optional, defaults to body)",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "coordinator_fetch",
     description:
       "Execute an HTTP request through the browser's network stack. " +
@@ -208,12 +228,6 @@ function textResult(text: string): CallToolResult {
   };
 }
 
-function imageResult(base64: string, mimeType: "image/png" | "image/jpeg"): CallToolResult {
-  return {
-    content: [{ type: "image", data: base64, mimeType } as ImageContent],
-  };
-}
-
 /**
  * Workspace-stable screenshot directory under os.tmpdir().
  * Uses a SHA-256 hash of cwd (truncated to 12 hex chars) so each project
@@ -230,119 +244,6 @@ function getScreenshotDir(): string {
 function screenshotFilename(format: string): string {
   const ts = new Date().toISOString().replace(/:/g, "-");
   return `screenshot-${ts}.${format === "jpeg" ? "jpg" : format}`;
-}
-
-// ─── Element picker script ──────────────────────────────────────────────────
-
-const ELEMENT_PICKER_JS = `
-(function() {
-  return new Promise((resolve) => {
-    const overlay = document.createElement('div');
-    overlay.id = '__bc_picker_overlay';
-    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:2147483647;cursor:crosshair;';
-
-    const highlight = document.createElement('div');
-    highlight.id = '__bc_picker_highlight';
-    highlight.style.cssText = 'position:fixed;pointer-events:none;border:2px solid #4A90D9;background:rgba(74,144,217,0.15);z-index:2147483646;display:none;';
-    document.body.appendChild(highlight);
-
-    let lastTarget = null;
-
-    overlay.addEventListener('mousemove', (e) => {
-      overlay.style.pointerEvents = 'none';
-      const el = document.elementFromPoint(e.clientX, e.clientY);
-      overlay.style.pointerEvents = 'auto';
-      if (el && el !== overlay && el !== highlight) {
-        lastTarget = el;
-        const rect = el.getBoundingClientRect();
-        highlight.style.left = rect.left + 'px';
-        highlight.style.top = rect.top + 'px';
-        highlight.style.width = rect.width + 'px';
-        highlight.style.height = rect.height + 'px';
-        highlight.style.display = 'block';
-      }
-    });
-
-    overlay.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      overlay.remove();
-      highlight.remove();
-
-      if (!lastTarget) {
-        resolve(JSON.stringify({ error: 'No element selected' }));
-        return;
-      }
-
-      const el = lastTarget;
-      const rect = el.getBoundingClientRect();
-      const attrs = {};
-      for (const a of el.attributes) attrs[a.name] = a.value;
-
-      // Generate CSS selector
-      let selector = el.tagName.toLowerCase();
-      if (el.id) selector += '#' + el.id;
-      for (const cls of el.classList) selector += '.' + cls;
-
-      // If selector is not unique, add nth-child
-      if (!el.id && document.querySelectorAll(selector).length > 1) {
-        const parent = el.parentElement;
-        if (parent) {
-          const siblings = Array.from(parent.children);
-          const idx = siblings.indexOf(el) + 1;
-          selector += ':nth-child(' + idx + ')';
-        }
-      }
-
-      resolve(JSON.stringify({
-        tagName: el.tagName.toLowerCase(),
-        attributes: attrs,
-        textContent: (el.textContent || '').trim().slice(0, 200),
-        cssSelector: selector,
-        boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-        nodeId: 0
-      }));
-    });
-
-    document.body.appendChild(overlay);
-  });
-})()
-`;
-
-// ─── DOM depth limiter script ───────────────────────────────────────────────
-
-function getDomScript(selector?: string, depth?: number): string {
-  if (selector && depth) {
-    return `
-      (function() {
-        const el = document.querySelector(${JSON.stringify(selector)});
-        if (!el) return 'Element not found: ${selector}';
-        function limit(node, d) {
-          if (d <= 0) return '';
-          const clone = node.cloneNode(false);
-          if (d > 1) {
-            for (const child of node.children) {
-              clone.appendChild(limit(child, d - 1).cloneNode ? limit(child, d - 1) : document.createTextNode(''));
-            }
-          }
-          const wrap = document.createElement('div');
-          wrap.appendChild(clone);
-          return wrap.innerHTML;
-        }
-        return limit(el, ${depth});
-      })()
-    `;
-  }
-  if (selector) {
-    return `
-      (function() {
-        const el = document.querySelector(${JSON.stringify(selector)});
-        return el ? el.outerHTML : 'Element not found: ${selector}';
-      })()
-    `;
-  }
-  // Full document — truncate
-  return `document.documentElement.outerHTML.slice(0, 100000)`;
 }
 
 // ─── Coordinator Server ─────────────────────────────────────────────────────
@@ -363,7 +264,7 @@ export class CoordinatorServer {
     this.server = new Server(
       {
         name: "browser-coordinator",
-        version: "0.2.0",
+        version: "0.3.0",
       },
       {
         capabilities: {
@@ -430,7 +331,7 @@ export class CoordinatorServer {
   }
 
   /**
-   * Launch a browser and return its CDP port.
+   * Launch a browser and return its internal port.
    */
   private async launchBrowserInternal(launchOpts?: LauncherOptions): Promise<number> {
     const opts = launchOpts ?? this.opts.browser;
@@ -438,26 +339,30 @@ export class CoordinatorServer {
 
     log("Launching browser...");
     this.browserInstance = await launchBrowser(port, opts);
-    log(`Browser launched: ${this.browserInstance.browser.name} on internal port ${port}`);
+    log(`Browser launched: ${this.browserInstance.browser.name} (${this.browserInstance.engine}) on internal port ${port}`);
 
     return port;
   }
 
   /**
-   * Get a CDP client connected to the active browser target.
+   * Get a BrowserSession for the active browser.
+   *
+   * Creates a new session each time (sessions are short-lived per tool call).
+   * For Chromium: connects via CDP to the backend or proxy port.
+   * For Firefox: connects via BiDi WebSocket URL from the browser instance.
+   * For VS Code: always Chromium/CDP via the proxy.
    */
-  private async getCdpClient(): Promise<{ client: CdpClient; cleanup: () => void }> {
+  private async getSession(): Promise<BrowserSession> {
+    // Firefox path: use BiDi session
+    if (this.browserInstance?.engine === "firefox" && this.browserInstance.bidiWsUrl) {
+      return createBidiSession(this.browserInstance.bidiWsUrl);
+    }
+
+    // Chromium path (including VS Code): use CDP session
     const proxyPort = this.cdpProxy.getPort();
     const backendPort = this.cdpProxy.getBackendPort();
-
-    // Prefer direct connection to backend for CDP operations
     const port = backendPort ?? proxyPort;
-
-    const { client } = await connectToTarget(port);
-    return {
-      client,
-      cleanup: () => client.close(),
-    };
+    return createCdpSession(port);
   }
 
   /**
@@ -508,11 +413,12 @@ export class CoordinatorServer {
         }
 
         if (browsers.length === 0 && lines.length === 0) {
-          return textResult("No CDP-capable browsers found on this system.");
+          return textResult("No browsers found on this system.");
         }
 
         for (const b of browsers) {
-          lines.push(`- ${b.name} (${b.type}) → ${b.path}`);
+          const protocol = b.supportsBidi ? "(BiDi)" : b.supportsCDP ? "(CDP)" : "";
+          lines.push(`- ${b.name} (${b.type}) ${protocol} → ${b.path}`);
         }
         return textResult(`Detected browsers:\n${lines.join("\n")}`);
       }
@@ -525,7 +431,8 @@ export class CoordinatorServer {
         if (extensionActive && !browserRunning) {
           browserStatus = "VS Code Simple Browser" + (this.vsCodeEnv.activeBrowserUrl ? ` (${this.vsCodeEnv.activeBrowserUrl})` : "");
         } else if (browserRunning) {
-          browserStatus = `Running (${this.browserInstance!.browser.name}, internal port ${this.browserInstance!.cdpPort})`;
+          const engineLabel = this.browserInstance!.engine === "firefox" ? "BiDi" : "CDP";
+          browserStatus = `Running (${this.browserInstance!.browser.name}, ${engineLabel}, internal port ${this.browserInstance!.cdpPort})`;
         } else {
           browserStatus = "Not running (will launch on first CDP connection)";
         }
@@ -552,7 +459,7 @@ export class CoordinatorServer {
         if (!browserType && this.vsCodeEnv.ipcSocketPath) {
           return textResult(
             "Using VS Code browser. Use coordinator_navigate to open a URL.\n" +
-            "To force an external browser, specify browserType (e.g. chrome)."
+            "To force an external browser, specify browserType (e.g. chrome, firefox)."
           );
         }
 
@@ -570,12 +477,19 @@ export class CoordinatorServer {
 
         const internalPort = await this.launchBrowserInternal(launchOpts);
 
-        // Update proxy backend and close existing connections
-        this.cdpProxy.setBackend(internalPort);
-        this.cdpProxy.closeConnections();
+        // For Chromium: update proxy backend. For Firefox: proxy has no backend.
+        if (this.browserInstance!.engine === "chromium") {
+          this.cdpProxy.setBackend(internalPort);
+          this.cdpProxy.closeConnections();
+        } else {
+          // Firefox: clear CDP proxy backend (child MCPs won't work)
+          this.cdpProxy.clearBackend();
+          this.cdpProxy.closeConnections();
+        }
 
+        const engineLabel = this.browserInstance!.engine === "firefox" ? "BiDi" : "CDP";
         return textResult(
-          `Browser launched: ${this.browserInstance!.browser.name} (CDP proxy port ${this.cdpProxy.getPort()}, internal port ${internalPort})`
+          `Browser launched: ${this.browserInstance!.browser.name} (${engineLabel}, proxy port ${this.cdpProxy.getPort()}, internal port ${internalPort})`
         );
       }
 
@@ -601,11 +515,15 @@ export class CoordinatorServer {
 
           const internalPort = await this.launchBrowserInternal(prevOpts);
 
-          this.cdpProxy.setBackend(internalPort);
+          if (this.browserInstance!.engine === "chromium") {
+            this.cdpProxy.setBackend(internalPort);
+          } else {
+            this.cdpProxy.clearBackend();
+          }
           this.cdpProxy.closeConnections();
 
           return textResult(
-            `Browser restarted (CDP proxy port ${this.cdpProxy.getPort()}, internal port ${internalPort})`
+            `Browser restarted (proxy port ${this.cdpProxy.getPort()}, internal port ${internalPort})`
           );
         }
         return textResult("No browser was running. Browser will launch on next CDP connection.");
@@ -626,17 +544,16 @@ export class CoordinatorServer {
           }
         }
 
-        // Fall back to CDP
+        // Fall back to browser session
+        let session: BrowserSession | undefined;
         try {
-          const { client, cleanup } = await this.getCdpClient();
-          try {
-            await client.send("Page.navigate", { url });
-            return textResult(`Navigated to ${url} (via CDP)`);
-          } finally {
-            cleanup();
-          }
+          session = await this.getSession();
+          await session.navigate(url);
+          return textResult(`Navigated to ${url} (via ${session.engine === "firefox" ? "BiDi" : "CDP"})`);
         } catch (err) {
           return textResult(`Failed to navigate: ${err instanceof Error ? err.message : err}`);
+        } finally {
+          await session?.close();
         }
       }
 
@@ -648,38 +565,24 @@ export class CoordinatorServer {
           await this.sendIpc("start_element_select");
         }
 
+        let session: BrowserSession | undefined;
         try {
-          const { client, cleanup } = await this.getCdpClient();
+          session = await this.getSession();
+          const value = await session.selectElement(timeout);
+
+          // Cancel selection state in extension
+          if (this.vsCodeEnv.ipcSocketPath) {
+            await this.sendIpc("cancel_element_select");
+          }
+
           try {
-            // Inject the element picker script
-            const result = await client.send("Runtime.evaluate", {
-              expression: ELEMENT_PICKER_JS,
-              awaitPromise: true,
-              returnByValue: true,
-              timeout,
-            }) as { result?: { value?: string } };
-
-            // Cancel selection state in extension
-            if (this.vsCodeEnv.ipcSocketPath) {
-              await this.sendIpc("cancel_element_select");
+            const element = JSON.parse(value);
+            if (element.error) {
+              return textResult(`Element selection failed: ${element.error}`);
             }
-
-            const value = result?.result?.value;
-            if (!value) {
-              return textResult("Element selection returned no result.");
-            }
-
-            try {
-              const element = JSON.parse(value);
-              if (element.error) {
-                return textResult(`Element selection failed: ${element.error}`);
-              }
-              return textResult(JSON.stringify(element, null, 2));
-            } catch {
-              return textResult(`Unexpected picker result: ${value}`);
-            }
-          } finally {
-            cleanup();
+            return textResult(JSON.stringify(element, null, 2));
+          } catch {
+            return textResult(`Unexpected picker result: ${value}`);
           }
         } catch (err) {
           // Cancel selection state on error
@@ -687,6 +590,8 @@ export class CoordinatorServer {
             await this.sendIpc("cancel_element_select");
           }
           return textResult(`Element selection failed: ${err instanceof Error ? err.message : err}`);
+        } finally {
+          await session?.close();
         }
       }
 
@@ -694,96 +599,68 @@ export class CoordinatorServer {
         const selector = args.selector as string | undefined;
         const depth = args.depth as number | undefined;
 
+        let session: BrowserSession | undefined;
         try {
-          const { client, cleanup } = await this.getCdpClient();
-          try {
-            const script = getDomScript(selector, depth);
-            const result = await client.send("Runtime.evaluate", {
-              expression: script,
-              returnByValue: true,
-            }) as { result?: { value?: string } };
-
-            const html = result?.result?.value;
-            if (!html) {
-              return textResult("No DOM content returned.");
-            }
-            return textResult(html);
-          } finally {
-            cleanup();
-          }
+          session = await this.getSession();
+          const html = await session.getRenderedDOM({ selector, depth });
+          return textResult(html);
         } catch (err) {
           return textResult(`Failed to get DOM: ${err instanceof Error ? err.message : err}`);
+        } finally {
+          await session?.close();
         }
       }
 
       case "coordinator_screenshot": {
         const selector = args.selector as string | undefined;
-        const format = (args.format as string) ?? "png";
+        const format = (args.format as "png" | "jpeg") ?? "png";
         const clipArg = args.clip as { x: number; y: number; width: number; height: number } | undefined;
         const fullPage = (args.fullPage as boolean) ?? false;
         const outputDir = args.outputDir as string | undefined;
 
+        let session: BrowserSession | undefined;
         try {
-          const { client, cleanup } = await this.getCdpClient();
-          try {
-            let clip: { x: number; y: number; width: number; height: number; scale: number } | undefined;
-            let captureBeyondViewport = false;
+          session = await this.getSession();
+          const result = await session.screenshot({
+            selector,
+            format,
+            clip: clipArg,
+            fullPage,
+          });
 
-            // Precedence: clip > selector > viewport/fullPage
-            if (clipArg) {
-              clip = { ...clipArg, scale: 1 };
-            } else if (selector) {
-              const boxResult = await client.send("Runtime.evaluate", {
-                expression: `
-                  (function() {
-                    const el = document.querySelector(${JSON.stringify(selector)});
-                    if (!el) return null;
-                    const rect = el.getBoundingClientRect();
-                    return JSON.stringify({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
-                  })()
-                `,
-                returnByValue: true,
-              }) as { result?: { value?: string } };
+          // Save to disk
+          const dir = outputDir ?? getScreenshotDir();
+          fs.mkdirSync(dir, { recursive: true });
+          const filename = screenshotFilename(result.format);
+          const filePath = path.join(dir, filename);
+          fs.writeFileSync(filePath, Buffer.from(result.data, "base64"));
 
-              const boxJson = boxResult?.result?.value;
-              if (!boxJson) {
-                return textResult(`Element not found: ${selector}`);
-              }
-              const box = JSON.parse(boxJson);
-              clip = { ...box, scale: 1 };
-            } else if (fullPage) {
-              captureBeyondViewport = true;
-            }
-
-            const result = await client.send("Page.captureScreenshot", {
-              format,
-              ...(clip ? { clip } : {}),
-              ...(captureBeyondViewport ? { captureBeyondViewport: true } : {}),
-            }) as { data?: string };
-
-            if (!result?.data) {
-              return textResult("Screenshot returned no data.");
-            }
-
-            // Save to disk
-            const dir = outputDir ?? getScreenshotDir();
-            fs.mkdirSync(dir, { recursive: true });
-            const filename = screenshotFilename(format);
-            const filePath = path.join(dir, filename);
-            fs.writeFileSync(filePath, Buffer.from(result.data, "base64"));
-
-            const mimeType = format === "jpeg" ? "image/jpeg" : "image/png";
-            return {
-              content: [
-                { type: "text", text: `Screenshot saved to ${filePath}` } as TextContent,
-                { type: "image", data: result.data, mimeType } as ImageContent,
-              ],
-            };
-          } finally {
-            cleanup();
-          }
+          const mimeType = result.format === "jpeg" ? "image/jpeg" : "image/png";
+          return {
+            content: [
+              { type: "text", text: `Screenshot saved to ${filePath}` } as TextContent,
+              { type: "image", data: result.data, mimeType } as ImageContent,
+            ],
+          };
         } catch (err) {
           return textResult(`Screenshot failed: ${err instanceof Error ? err.message : err}`);
+        } finally {
+          await session?.close();
+        }
+      }
+
+      case "coordinator_get_markdown": {
+        const selector = args.selector as string | undefined;
+
+        let session: BrowserSession | undefined;
+        try {
+          session = await this.getSession();
+          const md = await session.getMarkdown({ selector });
+          return textResult(md);
+        } catch (err) {
+          return textResult(`Failed to get markdown: ${err instanceof Error ? err.message : err}`);
+        } finally {
+          await session?.close();
         }
       }
 
@@ -793,143 +670,21 @@ export class CoordinatorServer {
           return textResult("Error: url is required");
         }
 
-        const method = (args.method as string) ?? "GET";
-        const headers = (args.headers as Record<string, string>) ?? {};
-        const body = args.body as string | undefined;
-        const timeout = (args.timeout as number) ?? 30000;
-
-        let parsedUrl: URL;
+        let session: BrowserSession | undefined;
         try {
-          parsedUrl = new URL(url);
-        } catch {
-          return textResult(`Error: invalid URL: ${url}`);
-        }
-        const origin = parsedUrl.origin;
-
-        let mainClient: CdpClient | undefined;
-        let fetchClient: CdpClient | undefined;
-        let targetId: string | undefined;
-
-        try {
-          // Get main CDP client to issue Target commands
-          const conn = await this.getCdpClient();
-          mainClient = conn.client;
-
-          // Create a new background tab
-          const createResult = await mainClient.send("Target.createTarget", {
-            url: "about:blank",
-          }) as { targetId: string };
-          targetId = createResult.targetId;
-
-          // Find the new target's WebSocket URL
-          const proxyPort = this.cdpProxy.getPort();
-          const backendPort = this.cdpProxy.getBackendPort();
-          const port = backendPort ?? proxyPort;
-          const targets = await getTargets(port);
-          const newTarget = targets.find((t) => t.id === targetId);
-
-          if (!newTarget) {
-            return textResult("Error: failed to find newly created tab");
-          }
-
-          // Connect to the new tab
-          fetchClient = new CdpClient();
-          await fetchClient.connect(newTarget.webSocketDebuggerUrl);
-
-          // Enable Page domain and navigate to origin
-          await fetchClient.send("Page.enable");
-
-          const navDone = new Promise<void>((resolve, reject) => {
-            const timer = setTimeout(() => {
-              reject(new Error(`Navigation to origin timed out after ${timeout}ms`));
-            }, timeout);
-
-            fetchClient!.on("Page.frameNavigated", (params: Record<string, unknown>) => {
-              const frame = params.frame as { parentId?: string; url?: string } | undefined;
-              // Only care about the main frame (no parentId)
-              if (!frame?.parentId) {
-                clearTimeout(timer);
-                resolve();
-              }
-            });
+          session = await this.getSession();
+          const result = await session.browserFetch({
+            url,
+            method: (args.method as string) ?? "GET",
+            headers: (args.headers as Record<string, string>) ?? {},
+            body: args.body as string | undefined,
+            timeout: (args.timeout as number) ?? 30000,
           });
-
-          await fetchClient.send("Page.navigate", { url: `${origin}/` });
-          await navDone;
-
-          // Verify we're on the right origin (in case of redirect)
-          const locationResult = await fetchClient.send("Runtime.evaluate", {
-            expression: "window.location.origin",
-            returnByValue: true,
-          }) as { result?: { value?: string } };
-
-          const actualOrigin = locationResult?.result?.value;
-          if (actualOrigin !== origin) {
-            return textResult(
-              `Error: origin ${origin}/ redirected to ${actualOrigin}. ` +
-              `Navigate to the target origin first with coordinator_navigate, then retry.`
-            );
-          }
-
-          // Stop page loading to minimize side effects
-          await fetchClient.send("Page.stopLoading");
-
-          // Build and execute fetch
-          const fetchScript = `(async () => {
-  const resp = await fetch(${JSON.stringify(url)}, {
-    method: ${JSON.stringify(method)},
-    headers: ${JSON.stringify(headers)},
-    ${body !== undefined ? `body: ${JSON.stringify(body)},` : ""}
-    credentials: 'include',
-  });
-  const hdrs = {};
-  resp.headers.forEach((v, k) => { hdrs[k] = v; });
-  return JSON.stringify({
-    status: resp.status,
-    statusText: resp.statusText,
-    headers: hdrs,
-    body: await resp.text(),
-    url: resp.url,
-    redirected: resp.redirected,
-  });
-})()`;
-
-          const fetchResult = await fetchClient.send("Runtime.evaluate", {
-            expression: fetchScript,
-            awaitPromise: true,
-            returnByValue: true,
-            timeout,
-          }) as { result?: { value?: string }; exceptionDetails?: { text?: string; exception?: { description?: string } } };
-
-          if (fetchResult.exceptionDetails) {
-            const errMsg = fetchResult.exceptionDetails.exception?.description
-              ?? fetchResult.exceptionDetails.text
-              ?? "Unknown fetch error";
-            return textResult(`Fetch failed: ${errMsg}`);
-          }
-
-          const value = fetchResult?.result?.value;
-          if (!value) {
-            return textResult("Fetch returned no result.");
-          }
-
-          return textResult(value);
+          return textResult(result);
         } catch (err) {
           return textResult(`coordinator_fetch failed: ${err instanceof Error ? err.message : err}`);
         } finally {
-          if (fetchClient) {
-            fetchClient.close();
-          }
-          if (targetId && mainClient) {
-            try {
-              await mainClient.send("Target.closeTarget", { targetId });
-            } catch {
-              // Best-effort cleanup
-            }
-          }
-          if (mainClient) {
-            mainClient.close();
-          }
+          await session?.close();
         }
       }
 

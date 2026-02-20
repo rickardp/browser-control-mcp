@@ -24,6 +24,10 @@
     "ipc-types.ts",
     "ipc-socket.ts",
     "cdp-client.ts",
+    "bidi-client.ts",
+    "browser-session.ts",
+    "dom-scripts.ts",
+    "turndown-vendor.ts",
     "log.ts"
   ],
   "exclude": ["node_modules", "dist", "extension.ts"]

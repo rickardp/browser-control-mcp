@@ -62,10 +62,8 @@ describe("browser-detector", () => {
     });
 
     test("which fallback classifies edge correctly", () => {
-      let callIndex = 0;
-      cpMock.execSync.mockImplementation(() => {
-        callIndex++;
-        if (callIndex === 4) return "/usr/bin/microsoft-edge\n";
+      cpMock.execSync.mockImplementation((cmd: string) => {
+        if (cmd === "which microsoft-edge") return "/usr/bin/microsoft-edge\n";
         throw new Error("not found");
       });
 

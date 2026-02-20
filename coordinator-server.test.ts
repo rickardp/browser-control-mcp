@@ -192,7 +192,8 @@ describe("CoordinatorServer", () => {
       expect(toolNames).toContain("coordinator_get_dom");
       expect(toolNames).toContain("coordinator_screenshot");
       expect(toolNames).toContain("coordinator_fetch");
-      expect(toolNames).toHaveLength(10);
+      expect(toolNames).toContain("coordinator_get_markdown");
+      expect(toolNames).toHaveLength(11);
 
       // Should NOT contain child MCP tools
       expect(toolNames).not.toContain("browser_navigate");
@@ -217,7 +218,7 @@ describe("CoordinatorServer", () => {
         params: { name: "coordinator_list_browsers", arguments: {} },
       });
 
-      expect(result.content[0].text).toContain("No CDP-capable browsers found");
+      expect(result.content[0].text).toContain("No browsers found");
     });
 
     test("coordinator_status returns status info", async () => {
@@ -252,7 +253,7 @@ describe("CoordinatorServer", () => {
 
       expect(cpMock.spawn).toHaveBeenCalled();
       expect(result.content[0].text).toContain("Browser launched");
-      expect(result.content[0].text).toContain("CDP proxy port");
+      expect(result.content[0].text).toContain("proxy port");
     });
 
     test("coordinator_stop_browser when no browser running", async () => {

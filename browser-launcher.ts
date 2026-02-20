@@ -16,8 +16,11 @@ export interface LauncherOptions {
 export interface BrowserInstance {
   browser: BrowserInfo;
   process: ChildProcess;
+  engine: "chromium" | "firefox";
   cdpPort: number;
   cdpWsUrl: string;
+  /** BiDi WebSocket URL (Firefox only). */
+  bidiWsUrl: string | null;
   userDataDir: string;
 }
 
@@ -85,13 +88,20 @@ export async function launchBrowser(
   opts: LauncherOptions = {}
 ): Promise<BrowserInstance> {
   const browser = opts.browserPath
-    ? { name: "custom", type: "chrome" as const, path: opts.browserPath, supportsCDP: true }
+    ? { name: "custom", type: "chrome" as const, path: opts.browserPath, supportsCDP: true, supportsBidi: false }
     : findBrowser(opts.browserType);
 
   if (!browser) {
     throw new Error(
-      "No CDP-capable browser found. Install Chrome, Edge, or Chromium."
+      opts.browserType === "firefox"
+        ? "Firefox not found. Install Firefox 129+ for BiDi support."
+        : "No CDP-capable browser found. Install Chrome, Edge, or Chromium."
     );
+  }
+
+  // Dispatch to Firefox-specific launcher
+  if (browser.type === "firefox") {
+    return launchFirefox(port, browser, opts);
   }
 
   const userDataDir = opts.userDataDir ?? createUserDataDir();
@@ -177,8 +187,90 @@ export async function launchBrowser(
   return {
     browser,
     process: proc,
+    engine: "chromium" as const,
     cdpPort: port,
     cdpWsUrl,
+    bidiWsUrl: null,
+    userDataDir,
+  };
+}
+
+/**
+ * Launch Firefox with WebDriver BiDi enabled on the given port.
+ * Returns once "WebDriver BiDi listening on ws://..." is detected on stderr.
+ */
+async function launchFirefox(
+  port: number,
+  browser: BrowserInfo,
+  opts: LauncherOptions = {}
+): Promise<BrowserInstance> {
+  const userDataDir = opts.userDataDir ?? createUserDataDir();
+
+  const args = [
+    "--remote-debugging-port", String(port),
+    "--profile", userDataDir,
+    "--no-remote",
+  ];
+
+  if (opts.headless !== false) {
+    args.push("--headless");
+  }
+
+  // about:blank as initial page
+  args.push("about:blank");
+
+  log(`Launching Firefox: ${browser.path}`);
+  log(`  BiDi port: ${port}`);
+  log(`  Profile dir: ${userDataDir}`);
+
+  const proc = spawn(browser.path, args, {
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: false,
+  });
+
+  // Parse BiDi WebSocket URL from stderr
+  // Firefox outputs: "WebDriver BiDi listening on ws://127.0.0.1:{port}"
+  const bidiWsUrl = await new Promise<string>((resolve, reject) => {
+    let stderr = "";
+    const timeout = setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch { /* already dead */ }
+      reject(new Error(`Firefox did not produce BiDi URL within 15s. stderr: ${stderr}`));
+    }, 15000);
+
+    proc.stderr!.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderr += text;
+      log(`[firefox stderr] ${text.trim()}`);
+
+      const match = text.match(/WebDriver BiDi listening on (ws:\/\/.+)/);
+      if (match) {
+        clearTimeout(timeout);
+        resolve(match[1].trim());
+      }
+    });
+
+    proc.on("error", (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+
+    proc.on("exit", (code) => {
+      clearTimeout(timeout);
+      if (code !== null) {
+        reject(new Error(`Firefox exited with code ${code}. stderr: ${stderr}`));
+      }
+    });
+  });
+
+  log(`Firefox ready. BiDi: ${bidiWsUrl}`);
+
+  return {
+    browser,
+    process: proc,
+    engine: "firefox",
+    cdpPort: port,
+    cdpWsUrl: "", // Firefox doesn't provide a CDP WS URL
+    bidiWsUrl,
     userDataDir,
   };
 }

@@ -27,18 +27,37 @@ Host → Coordinator MCP (coordinator_* tools)
             ↓ CDP
      CDP Reverse Proxy (stable port, state file)
             ↓ CDP (internal port)
-     Browser (Chrome/Edge/etc)
+     Chromium Browser (Chrome/Edge/Chromium/Brave)
+
+     Coordinator MCP ──BiDi WebSocket──→ Firefox (when --browser firefox)
 ```
+
+### Coordinator Tools
+
+- `coordinator_list_browsers` — List detected browsers (Chrome, Edge, Chromium, Brave, Firefox)
+- `coordinator_status` — Current state: browser, engine (CDP/BiDi), proxy port, VS Code integration
+- `coordinator_launch_browser` / `coordinator_stop_browser` / `coordinator_restart_browser` — Browser lifecycle
+- `coordinator_navigate` — Navigate to a URL (VS Code Simple Browser, CDP, or BiDi)
+- `coordinator_select_element` — Interactive element picker
+- `coordinator_get_dom` — Get rendered DOM as HTML, with shadow DOM support (Element.getHTML)
+- `coordinator_get_markdown` — Get page content as Markdown (via vendored Turndown.js)
+- `coordinator_screenshot` — Capture screenshot (full page or element)
+- `coordinator_fetch` — HTTP request through browser's network stack (preserves cookies, bypasses CORS)
 
 ## Project Structure
 
 ```
 cli.ts                     Entry point, arg parsing, wrap subcommand, stdio transport
-coordinator-server.ts      Core MCP server, coordinator tools, CDP proxy integration
+coordinator-server.ts      Core MCP server, coordinator tools, session management
+browser-session.ts         BrowserSession interface + CdpSession + BidiSession implementations
+cdp-client.ts              Minimal CDP WebSocket client (Chromium)
+bidi-client.ts             Minimal WebDriver BiDi WebSocket client (Firefox)
+dom-scripts.ts             In-browser JS: element picker, shadow DOM serialization, bounding box
+turndown-vendor.ts         Vendored Turndown.js for HTML-to-Markdown conversion
 cdp-proxy.ts               TCP reverse proxy for CDP connections
 state.ts                   State file management (proxy port discovery)
-browser-launcher.ts        Port allocation, browser spawn, lifecycle
-browser-detector.ts        Cross-platform browser detection
+browser-launcher.ts        Port allocation, browser spawn (Chromium + Firefox), lifecycle
+browser-detector.ts        Cross-platform browser detection (CDP + BiDi)
 vscode-integration.ts      VS Code environment detection, CDP discovery
 extension.ts               VS Code companion extension
 ```
@@ -74,6 +93,7 @@ Architecture decisions and specifications are in `docs/`:
   - [features/browser-lifecycle](docs/specs/features/browser-lifecycle.md) — Browser management
   - [features/vscode-integration](docs/specs/features/vscode-integration.md) — VS Code companion extension
   - [features/cdp-proxy](docs/specs/features/cdp-proxy.md) — CDP reverse proxy and state file
+- [compatibility](docs/compatibility.md) — Child MCP server compatibility (Playwright, Chrome DevTools, Selenium, Firefox, etc.)
 
 ## Boundaries (Quick Reference)
 
@@ -83,4 +103,4 @@ Architecture decisions and specifications are in `docs/`:
 - No database or persistence beyond the state file
 - Don't send `tools/list_changed` — hosts don't reliably support it
 - Don't proxy MCP tool calls — coordinator only exposes its own tools
-- Supported browsers: Chrome, Edge, Chromium, Brave (Firefox aspirational)
+- Supported browsers: Chrome, Edge, Chromium, Brave (CDP), Firefox (BiDi)

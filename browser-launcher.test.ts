@@ -165,10 +165,12 @@ describe("browser-launcher", () => {
       const proc = { killed: false, kill: killMock };
 
       stopBrowser({
-        browser: { name: "Chrome", type: "chrome", path: "/usr/bin/chrome", supportsCDP: true },
+        browser: { name: "Chrome", type: "chrome", path: "/usr/bin/chrome", supportsCDP: true, supportsBidi: false },
         process: proc as any,
+        engine: "chromium" as const,
         cdpPort: 9222,
         cdpWsUrl: "ws://127.0.0.1:9222/devtools/browser/abc",
+        bidiWsUrl: null,
         userDataDir: "/tmp/test-profile",
       });
 
@@ -181,10 +183,12 @@ describe("browser-launcher", () => {
       const proc = { killed: true, kill: killMock };
 
       stopBrowser({
-        browser: { name: "Chrome", type: "chrome", path: "/usr/bin/chrome", supportsCDP: true },
+        browser: { name: "Chrome", type: "chrome", path: "/usr/bin/chrome", supportsCDP: true, supportsBidi: false },
         process: proc as any,
+        engine: "chromium" as const,
         cdpPort: 9222,
         cdpWsUrl: "ws://127.0.0.1:9222/devtools/browser/abc",
+        bidiWsUrl: null,
         userDataDir: "/tmp/test-profile",
       });
 

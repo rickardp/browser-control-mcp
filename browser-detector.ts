@@ -7,6 +7,7 @@ export interface BrowserInfo {
   type: "chrome" | "edge" | "chromium" | "brave" | "safari" | "firefox";
   path: string;
   supportsCDP: boolean;
+  supportsBidi: boolean;
 }
 
 const BROWSER_PATHS: Record<string, Record<string, string[]>> = {
@@ -23,6 +24,10 @@ const BROWSER_PATHS: Record<string, Record<string, string[]>> = {
     ],
     brave: [
       "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    ],
+    firefox: [
+      "/Applications/Firefox.app/Contents/MacOS/firefox",
+      "/Applications/Firefox Nightly.app/Contents/MacOS/firefox",
     ],
     safari: [
       "/Applications/Safari.app/Contents/MacOS/Safari",
@@ -47,6 +52,11 @@ const BROWSER_PATHS: Record<string, Record<string, string[]>> = {
     brave: [
       "/usr/bin/brave-browser",
     ],
+    firefox: [
+      "/usr/bin/firefox",
+      "/usr/bin/firefox-esr",
+      "/snap/bin/firefox",
+    ],
   },
   win32: {
     chrome: [
@@ -64,6 +74,10 @@ const BROWSER_PATHS: Record<string, Record<string, string[]>> = {
     brave: [
       "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
       `${process.env.LOCALAPPDATA ?? ""}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
+    ],
+    firefox: [
+      "C:\\Program Files\\Mozilla Firefox\\firefox.exe",
+      "C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe",
     ],
   },
 };
@@ -83,6 +97,7 @@ export function detectBrowsers(): BrowserInfo[] {
           type: type as BrowserInfo["type"],
           path: browserPath,
           supportsCDP: type !== "firefox" && type !== "safari",
+          supportsBidi: type === "firefox",
         });
         break; // Take first match per type
       }
@@ -91,16 +106,18 @@ export function detectBrowsers(): BrowserInfo[] {
 
   // Fallback: try `which` on Linux/macOS
   if (os !== "win32" && found.length === 0) {
-    for (const cmd of ["google-chrome", "chromium", "chromium-browser", "microsoft-edge"]) {
+    for (const cmd of ["google-chrome", "chromium", "chromium-browser", "microsoft-edge", "firefox"]) {
       try {
         const p = execSync(`which ${cmd}`, { encoding: "utf8" }).trim();
         if (p) {
-          const type = cmd.includes("edge") ? "edge" : cmd.includes("chromium") ? "chromium" : "chrome";
+          const isFirefox = cmd === "firefox";
+          const type = isFirefox ? "firefox" : cmd.includes("edge") ? "edge" : cmd.includes("chromium") ? "chromium" : "chrome";
           found.push({
             name: cmd,
             type,
             path: p,
-            supportsCDP: true,
+            supportsCDP: !isFirefox,
+            supportsBidi: isFirefox,
           });
           break;
         }
@@ -118,11 +135,17 @@ export function findBrowser(preferredType?: string): BrowserInfo | null {
   if (browsers.length === 0) return null;
 
   if (preferredType) {
-    const match = browsers.find((b) => b.type === preferredType && b.supportsCDP);
-    if (match) return match;
+    // For Firefox, match on supportsBidi instead of supportsCDP
+    if (preferredType === "firefox") {
+      const match = browsers.find((b) => b.type === "firefox" && b.supportsBidi);
+      if (match) return match;
+    } else {
+      const match = browsers.find((b) => b.type === preferredType && b.supportsCDP);
+      if (match) return match;
+    }
   }
 
-  // Preference order: chrome > edge > chromium > brave
+  // Preference order: chrome > edge > chromium > brave (Firefox not auto-selected)
   const priority = ["chrome", "edge", "chromium", "brave"];
   for (const type of priority) {
     const match = browsers.find((b) => b.type === type && b.supportsCDP);

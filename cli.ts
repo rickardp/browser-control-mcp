@@ -89,7 +89,7 @@ MODES:
   wrap        Read coordinator state, inject CDP port into child command, run it
 
 OPTIONS:
-  --browser <type>    Preferred browser: chrome, edge, chromium, brave
+  --browser <type>    Preferred browser: chrome, edge, chromium, brave, firefox
   --browser-path <p>  Explicit path to browser executable
   --no-headless       Launch browser with UI (not headless)
   --no-vscode         Skip VS Code environment detection
@@ -111,9 +111,13 @@ EXAMPLES:
   # Force Edge, with UI visible
   npx @anthropic-community/browser-coordinator-mcp --browser edge --no-headless
 
-  # Wrap Playwright MCP with CDP endpoint injection
+  # Wrap Playwright MCP (Microsoft)
   npx @anthropic-community/browser-coordinator-mcp wrap -- \\
-    npx -y @anthropic-ai/mcp-server-playwright --cdp-endpoint={cdp_endpoint}
+    npx -y @playwright/mcp@latest --cdp-endpoint={cdp_endpoint}
+
+  # Wrap Chrome DevTools MCP (Google)
+  npx @anthropic-community/browser-coordinator-mcp wrap -- \\
+    npx -y chrome-devtools-mcp@latest --browser-url={cdp_endpoint}
 
 MCP CONFIG (.mcp.json):
   {
@@ -127,12 +131,14 @@ MCP CONFIG (.mcp.json):
         "args": [
           "-y", "@anthropic-community/browser-coordinator-mcp",
           "wrap", "--",
-          "npx", "-y", "@anthropic-ai/mcp-server-playwright",
+          "npx", "-y", "@playwright/mcp@latest",
           "--cdp-endpoint={cdp_endpoint}"
         ]
       }
     }
   }
+
+  See docs/compatibility.md for all supported child MCP servers.
 
 ENVIRONMENT:
   BROWSER_COORDINATOR_DEBUG=1  Enable debug logging to stderr
