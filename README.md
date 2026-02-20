@@ -20,7 +20,7 @@ Add both entries to your `.mcp.json` (Claude Code) or MCP client config:
       "args": [
         "-y", "@anthropic-community/browser-coordinator-mcp",
         "wrap", "--",
-        "npx", "-y", "@anthropic-ai/mcp-server-playwright",
+        "npx", "-y", "@playwright/mcp@latest",
         "--cdp-endpoint={cdp_endpoint}"
       ]
     }
@@ -29,6 +29,8 @@ Add both entries to your `.mcp.json` (Claude Code) or MCP client config:
 ```
 
 That's it. The coordinator launches a browser on demand, and Playwright MCP connects to it through a stable CDP proxy. No flags required.
+
+Works with any CDP-capable child MCP — see [docs/compatibility.md](docs/compatibility.md) for the full list including Chrome DevTools MCP, Selenium, Firefox DevTools, and more.
 
 ### Options
 
@@ -49,8 +51,32 @@ Pick a specific browser or show the UI:
       "args": [
         "-y", "@anthropic-community/browser-coordinator-mcp",
         "wrap", "--",
-        "npx", "-y", "@anthropic-ai/mcp-server-playwright",
+        "npx", "-y", "@playwright/mcp@latest",
         "--cdp-endpoint={cdp_endpoint}"
+      ]
+    }
+  }
+}
+```
+
+### Chrome DevTools MCP
+
+Google's Chrome DevTools MCP also connects through the coordinator:
+
+```json
+{
+  "mcpServers": {
+    "browser": {
+      "command": "npx",
+      "args": ["-y", "@anthropic-community/browser-coordinator-mcp"]
+    },
+    "chrome-devtools": {
+      "command": "npx",
+      "args": [
+        "-y", "@anthropic-community/browser-coordinator-mcp",
+        "wrap", "--",
+        "npx", "-y", "chrome-devtools-mcp@latest",
+        "--browser-url={cdp_endpoint}"
       ]
     }
   }
@@ -59,7 +85,7 @@ Pick a specific browser or show the UI:
 
 ### Custom child MCP
 
-Any CDP-based MCP server works — not just Playwright:
+Any CDP-based MCP server works. Use `wrap` to inject the proxy port into child args:
 
 ```json
 {
